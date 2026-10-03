@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Large data files — do NOT push to GitHub
+data/
+*.DTA
+*.dta
+*.zip
+*.XPT
+*.xpt
+*.sas7bdat
+
+# Scratch and temp files
+scratch/
+logs/
+artifacts/
+extracted/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# PDFs (large reference papers)
+*.pdf
+
+# Large images not needed for the app
+02-Screenshot*.png
+
+# Keep results/ EXCEPT large training data
+# Model weights ARE included (44MB .pt file is fine for GitHub)

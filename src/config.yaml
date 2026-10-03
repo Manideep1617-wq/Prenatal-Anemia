@@ -1,0 +1,10 @@
+paths:
+  data_dir:    "C:/Users/gshan/OneDrive/Documents/PrenatalAnemia/data"
+  image_dir:   "C:/Users/gshan/OneDrive/Documents/PrenatalAnemia/data/Dataset_sample"
+  results_dir: "C:/Users/gshan/OneDrive/Documents/PrenatalAnemia/results"
+
+training:
+  seed:         42
+  batch_size:   32
+  image_epochs: 10
+  lr:           0.0001

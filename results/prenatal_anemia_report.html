@@ -1,0 +1,114 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Prenatal Anemia Screening - Detailed Report</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; line-height: 1.6; color: #333; max-width: 1000px; margin: 0 auto; padding: 20px; background-color: #f4f7f6; }
+        .container { background-color: #fff; padding: 40px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        h1, h2, h3 { color: #2E86AB; }
+        .header { text-align: center; border-bottom: 2px solid #2E86AB; padding-bottom: 20px; margin-bottom: 30px; }
+        .section { margin-bottom: 40px; }
+        .metrics-grid { display: flex; justify-content: space-between; gap: 20px; margin-top: 20px; }
+        .metric-card { flex: 1; background: #fff; padding: 20px; border-radius: 8px; text-align: center; border: 1px solid #ddd; border-top: 4px solid #A23B72; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+        .metric-card.tab { border-top: 4px solid #2E86AB; }
+        .metric-value { font-size: 28px; font-weight: bold; margin-top: 10px; }
+        .img-grid { display: flex; flex-wrap: wrap; gap: 20px; justify-content: center; margin-top: 20px; }
+        .img-card { background: white; padding: 15px; border-radius: 8px; text-align: center; border: 1px solid #ddd; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+        .img-card img { max-width: 100%; height: auto; border-radius: 4px; }
+        table { width: 100%; border-collapse: collapse; margin-top: 15px; background: white; }
+        th, td { padding: 12px; border: 1px solid #ddd; text-align: left; }
+        th { background-color: #2E86AB; color: white; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <div class="header">
+        <h1>Prenatal Anemia Screening</h1>
+        <p><strong>Multimodal Deep Learning Project Report</strong></p>
+        <p>Generated on: 2026-10-02 14:06:33</p>
+    </div>
+
+    <div class="section">
+        <h2>1. Datasets Used</h2>
+        <table>
+            <tr><th>Modality</th><th>Dataset Name</th><th>Source</th><th>Volume</th></tr>
+            <tr><td>Tabular</td><td>CBC Analysis</td><td>Kaggle</td><td>103,221 records</td></tr>
+            <tr><td>Tabular</td><td>Maternal Health & High-Risk Pregnancy</td><td>Mendeley</td><td>1,179 records</td></tr>
+            <tr><td>Image</td><td>Nail & Conjunctival Anemia Images</td><td>Kaggle</td><td>7,041 images</td></tr>
+        </table>
+        <p><em>*Note: DHS Birth Recode data is downloaded but reserved for future large-scale pretraining.</em></p>
+    </div>
+
+    <div class="section">
+        <h2>2. Tabular Model Performance (XGBoost)</h2>
+        <p>Trained on combined blood count features (HGB, RBC, WBC, etc.) and maternal vitals to predict anemia risk.</p>
+        <div class="metrics-grid">
+            <div class="metric-card tab">
+                <div style="color:#666">Accuracy</div>
+                <div class="metric-value" style="color:#2E86AB">0.9995</div>
+            </div>
+            <div class="metric-card tab">
+                <div style="color:#666">F1 Score</div>
+                <div class="metric-value" style="color:#2E86AB">0.9995</div>
+            </div>
+            <div class="metric-card tab">
+                <div style="color:#666">AUC-ROC</div>
+                <div class="metric-value" style="color:#2E86AB">1.0000</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>3. Image Model Performance (ResNet-18)</h2>
+        <p>Fine-tuned on labeled palpebral conjunctiva and nail bed images to detect visual signs of anemia.</p>
+        <div class="metrics-grid">
+            <div class="metric-card">
+                <div style="color:#666">Accuracy</div>
+                <div class="metric-value" style="color:#A23B72">0.9446</div>
+            </div>
+            <div class="metric-card">
+                <div style="color:#666">F1 Score</div>
+                <div class="metric-value" style="color:#A23B72">0.9446</div>
+            </div>
+            <div class="metric-card">
+                <div style="color:#666">AUC-ROC</div>
+                <div class="metric-value" style="color:#A23B72">0.9873</div>
+            </div>
+        </div>
+        
+        <div class="img-grid">
+            <div class="img-card" style="width: 45%;">
+                <h4>Image Confusion Matrix</h4>
+                <img src="figures/img_confusion_matrix.png" alt="Image Confusion Matrix">
+            </div>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>4. Model Comparison</h2>
+        <div class="img-grid">
+            <div class="img-card" style="width: 70%;">
+                <h4>Performance Metrics Comparison</h4>
+                <img src="figures/model_comparison.png" alt="Model Comparison">
+            </div>
+        </div>
+    </div>
+    
+    <div class="section">
+        <h2>5. Conclusion & Next Steps</h2>
+        <p>Both models demonstrate exceptional performance on their respective modalities. The tabular XGBoost model achieves near-perfect accuracy (99.95%) utilizing critical clinical features like Hemoglobin (HGB). The ResNet-18 visual model provides a highly robust non-invasive alternative, achieving 94.46% accuracy using just smartphone-captured images of eyes and nails.</p>
+        <p><strong>Next Steps for Research Paper:</strong></p>
+        <ul>
+            <li>Evaluate the late-fusion model on an independent holdout set to measure complementary performance.</li>
+            <li>Incorporate the DHS demographic features for a socio-clinical analysis.</li>
+            <li>Deploy the model weights (<code>xgb_tabular.json</code> and <code>image_model_best.pt</code>) via a web interface for clinical testing.</li>
+        </ul>
+    </div>
+</div>
+
+</body>
+</html>
