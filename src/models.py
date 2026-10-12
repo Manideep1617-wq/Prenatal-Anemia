@@ -92,50 +92,65 @@ class ImageModel(nn.Module):
 # 3. FUSION MODEL – late fusion of tabular + image embeddings
 # ─────────────────────────────────────────────────────────────────────────────
 
-class FusionModel(nn.Module):
+class TransformerFusionModel(nn.Module):
+    """Transformer‑based multimodal fusion.
+    * Tabular encoder → 64‑dim embedding (linear + ReLU).
+    * Image encoder (ResNet‑18 backbone) → 512‑dim embedding.
+    * Concatenate embeddings → sequence length 2, embed dim 512.
+    * Pass through a small TransformerEncoder (2 layers, 4 heads).
+    * Take the CLS token (first token) and feed to a classification head.
+    The model outputs 4 severity classes (0‑None, 1‑Mild, 2‑Moderate, 3‑Severe).
     """
-    Late-fusion model:
-      tabular_branch  → 64-d vector
-      ResNet-18       → 512-d vector
-      Concatenate     → 576-d
-      Classifier head → num_classes
-    """
-    def __init__(self, tab_input_dim, img_embed_dim=512, hidden_dim=256,
-                 num_classes=2, dropout=0.3):
+    def __init__(self, tab_input_dim, img_embed_dim=512, num_classes=4,
+                 transformer_dim=256, nhead=4, num_layers=2, dropout=0.3):
         super().__init__()
-
-        # Tabular branch
-        self.tab_branch = nn.Sequential(
+        # Tabular encoder
+        self.tab_encoder = nn.Sequential(
             nn.Linear(tab_input_dim, 128),
-            nn.BatchNorm1d(128),
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(128, 64),
             nn.ReLU(),
         )
-
-        # Image branch (share weights with ImageModel)
+        # Image encoder (ResNet‑18)
         weights = tv_models.ResNet18_Weights.DEFAULT
         resnet = tv_models.resnet18(weights=weights)
-        resnet.fc = nn.Identity()            # strip classifier head
+        resnet.fc = nn.Identity()
         self.img_backbone = resnet
         self.img_proj = nn.Sequential(
-            nn.Linear(img_embed_dim, 128),
+            nn.Linear(img_embed_dim, transformer_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
         )
-
-        # Classifier head
+        # Positional encoding (learnable)
+        self.pos_embedding = nn.Parameter(torch.randn(2, transformer_dim))
+        # Transformer encoder
+        encoder_layer = nn.TransformerEncoderLayer(d_model=transformer_dim,
+                                                   nhead=nhead,
+                                                   dim_feedforward=transformer_dim*4,
+                                                   dropout=dropout,
+                                                   activation='gelu')
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        # Classification head
         self.classifier = nn.Sequential(
-            nn.Linear(64 + 128, hidden_dim),
+            nn.Linear(transformer_dim, transformer_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim, num_classes),
+            nn.Linear(transformer_dim, num_classes),
         )
 
     def forward(self, tab_x, img_x):
-        tab_feat = self.tab_branch(tab_x)
-        img_raw  = self.img_backbone(img_x)   # (B, 512)
-        img_feat = self.img_proj(img_raw)
-        combined = torch.cat([tab_feat, img_feat], dim=1)
-        return self.classifier(combined)
+        # Encode each modality
+        tab_feat = self.tab_encoder(tab_x)                 # (B, 64)
+        img_feat = self.img_backbone(img_x)               # (B, 512)
+        img_feat = self.img_proj(img_feat)                # (B, transformer_dim)
+        # Project tabular features to transformer_dim
+        tab_proj = nn.Linear(tab_feat.size(1), img_feat.size(1)).to(tab_feat.device)
+        tab_feat_proj = tab_proj(tab_feat)                # (B, transformer_dim)
+        seq = torch.stack([tab_feat_proj, img_feat], dim=1)  # (B, 2, transformer_dim)
+        seq = seq + self.pos_embedding                     # broadcast positional encodings
+        seq = seq.transpose(0, 1)                         # (2, B, D) for transformer
+        transformed = self.transformer(seq)               # (2, B, D)
+        cls_token = transformed[0]                        # (B, D)
+        out = self.classifier(cls_token)                  # (B, num_classes)
+        return out

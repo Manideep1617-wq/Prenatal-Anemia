@@ -158,10 +158,88 @@ def main():
     tab_metrics = train_tabular_model(X_tr, y_tr, X_val, y_val, RESULTS_DIR)
     print_progress(80, 100, "Tabular model trained")
 
+    # ─── Train transformer‑fusion model ────────────────────────────────────────
+    # Convert tabular data to tensors for fusion training
+    X_tr_tensor = torch.tensor(X_tr, dtype=torch.float32).to(device)
+    y_tr_tensor = torch.tensor(y_tr, dtype=torch.long).to(device)
+    X_val_tensor = torch.tensor(X_val, dtype=torch.float32).to(device)
+    y_val_tensor = torch.tensor(y_val, dtype=torch.long).to(device)
+
+    from src.models import TransformerFusionModel
+    tab_input_dim = X_tr.shape[1]
+    fusion_model = TransformerFusionModel(tab_input_dim=tab_input_dim).to(device)
+    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.AdamW(fusion_model.parameters(), lr=LR, weight_decay=1e-4)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
+    best_fusion_acc = 0.0
+    best_fusion_path = os.path.join(RESULTS_DIR, 'fusion_transformer.pt')
+    print("\n" + "="*60)
+    print("  PHASE 3 – Training Transformer‑Fusion Model")
+    print("="*60)
+    for epoch in range(EPOCHS):
+        fusion_model.train()
+        running_loss = 0.0
+        correct = 0
+        total = 0
+        for i, (imgs, labels) in enumerate(train_img_loader):
+            batch_start = i * BATCH_SIZE
+            batch_end = batch_start + imgs.size(0)
+            tab_batch = X_tr_tensor[batch_start:batch_end]
+            lbl_batch = labels.to(device)
+            optimizer.zero_grad()
+            outputs = fusion_model(tab_batch, imgs.to(device))
+            loss = criterion(outputs, lbl_batch)
+            loss.backward()
+            optimizer.step()
+            running_loss += loss.item() * lbl_batch.size(0)
+            _, preds = torch.max(outputs, 1)
+            correct += (preds == lbl_batch).sum().item()
+            total += lbl_batch.size(0)
+        train_acc = correct / total if total > 0 else 0
+        scheduler.step()
+        # Validation
+        fusion_model.eval()
+        val_correct = 0
+        val_total = 0
+        with torch.no_grad():
+            for i, (imgs, labels) in enumerate(val_img_loader):
+                batch_start = i * BATCH_SIZE
+                batch_end = batch_start + imgs.size(0)
+                tab_batch = X_val_tensor[batch_start:batch_end]
+                lbl_batch = labels.to(device)
+                outputs = fusion_model(tab_batch, imgs.to(device))
+                _, preds = torch.max(outputs, 1)
+                val_correct += (preds == lbl_batch).sum().item()
+                val_total += lbl_batch.size(0)
+        val_acc = val_correct / val_total if val_total > 0 else 0
+        print(f"\n  Epoch {epoch+1}/{EPOCHS} | Train‑acc={train_acc:.4f} | Val‑acc={val_acc:.4f}")
+        if val_acc > best_fusion_acc:
+            best_fusion_acc = val_acc
+            torch.save(fusion_model.state_dict(), best_fusion_path)
+            print(f"  ✔ Best fusion model saved (val‑acc={best_fusion_acc:.4f})")
+    # Load best fusion model for final evaluation
+    fusion_model.load_state_dict(torch.load(best_fusion_path, map_location=device))
+    fusion_model.eval()
+    all_preds, all_labels = [], []
+    with torch.no_grad():
+        for i, (imgs, labels) in enumerate(val_img_loader):
+            batch_start = i * BATCH_SIZE
+            batch_end = batch_start + imgs.size(0)
+            tab_batch = X_val_tensor[batch_start:batch_end]
+            lbl_batch = labels.to(device)
+            outputs = fusion_model(tab_batch, imgs.to(device))
+            _, preds = torch.max(outputs, 1)
+            all_preds.extend(preds.cpu().numpy())
+            all_labels.extend(lbl_batch.cpu().numpy())
+    fusion_acc = accuracy_score(all_labels, all_preds)
+    fusion_f1 = f1_score(all_labels, all_preds, average='weighted', zero_division=0)
+    print(f"\n  Fusion Model Final → Acc={fusion_acc:.4f}  F1={fusion_f1:.4f}")
+
     # ─── Save all metrics ──────────────────────────────────────────────────
     all_metrics = {
         'image_model' : img_metrics,
         'tabular_model': tab_metrics,
+        'fusion_model' : {'accuracy': fusion_acc, 'f1': fusion_f1},
         'summary': {
             'image_accuracy'   : img_metrics['accuracy'],
             'image_f1'         : img_metrics['f1'],
@@ -169,6 +247,8 @@ def main():
             'tabular_accuracy' : tab_metrics['accuracy'],
             'tabular_f1'       : tab_metrics['f1'],
             'tabular_auc'      : tab_metrics['auc'],
+            'fusion_accuracy'  : fusion_acc,
+            'fusion_f1'        : fusion_f1,
         }
     }
     metrics_path = os.path.join(RESULTS_DIR, 'metrics.json')
@@ -181,6 +261,7 @@ def main():
     print(f"{'='*60}")
     print(f"  Image  → Acc={img_metrics['accuracy']:.4f}  F1={img_metrics['f1']:.4f}  AUC={img_metrics['auc']}")
     print(f"  Tabular→ Acc={tab_metrics['accuracy']:.4f}  F1={tab_metrics['f1']:.4f}  AUC={tab_metrics['auc']}")
+    print(f"  Fusion → Acc={fusion_acc:.4f}  F1={fusion_f1:.4f}")
     print(f"  Metrics saved → {metrics_path}")
     print(f"{'='*60}")
 
