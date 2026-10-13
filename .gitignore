@@ -1,44 +1,38 @@
-# Python
+# ── Python ──────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
 .Python
 *.egg-info/
+*.egg
 
-# Virtual environments
+# ── Virtual environments ─────────────────────────────────
 .venv/
 venv/
 env/
 
-# Large data files — do NOT push to GitHub
+# ── Data (too large for GitHub) ──────────────────────────
 data/
 *.DTA
 *.dta
-*.zip
 *.XPT
 *.xpt
 *.sas7bdat
 
-# Scratch and temp files
-scratch/
-logs/
-artifacts/
-extracted/
+# ── Research papers (PDFs) ───────────────────────────────
+Research_Papers/
+*.pdf
 
-# Jupyter
-.ipynb_checkpoints/
-
-# OS
+# ── OS files ─────────────────────────────────────────────
 .DS_Store
 Thumbs.db
 desktop.ini
 
-# PDFs (large reference papers)
-*.pdf
+# ── Jupyter checkpoints ──────────────────────────────────
+.ipynb_checkpoints/
 
-# Large images not needed for the app
-02-Screenshot*.png
-
-# Keep results/ EXCEPT large training data
-# Model weights ARE included (44MB .pt file is fine for GitHub)
+# ── Results: keep figures + records + metrics, skip large weights ──
+# (weights are committed separately after Colab training)
+# Uncomment the line below to also exclude weights:
+# results/checkpoints/*.pt
