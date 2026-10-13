@@ -51,8 +51,67 @@ IMG_MODEL_PATH    = os.path.join(CHECKPOINTS_DIR, "image_model_best.pt")
 FUSION_MODEL_PATH = os.path.join(CHECKPOINTS_DIR, "fusion_transformer.pt")
 
 # ── Features (alphabetical — must match training) ────────────────────────────
-FEATURES = ['Age','BMI','BS','Body Temp','Diastolic','HCT','HGB',
-            'Heart Rate','MCH','MCHC','MCV','MPV','PLT','RBC','RDW','Systolic BP','WBC']
+# ── All 17 display features (for UI inputs) ───────────────────────────────────
+ALL_FEATURES = ['Age','BMI','BS','Body Temp','Diastolic','HCT','HGB',
+                'Heart Rate','MCH','MCHC','MCV','MPV','PLT','RBC','RDW','Systolic BP','WBC']
+
+# ── CBC features used by the XGBoost model (10, alphabetical) ─────────────────
+# Model was retrained on CBC-only data — maternal vitals are shown in UI but
+# NOT passed to the model (they weren't in the training data).
+CBC_FEATURES = ['HCT','HGB','MCH','MCHC','MCV','MPV','PLT','RBC','RDW','WBC']
+
+# Keep FEATURES as CBC_FEATURES for model inference
+FEATURES = CBC_FEATURES
+
+# ── Load scaler params from saved JSON (produced by retrain_xgb_cbc.py) ──────
+_SCALER_PATH = os.path.join(CHECKPOINTS_DIR, "scaler_params.json")
+_scaler_loaded = False
+SCALER_MEAN = None
+SCALER_STD  = None
+
+if os.path.exists(_SCALER_PATH):
+    try:
+        with open(_SCALER_PATH) as f:
+            _sp = json.load(f)
+        SCALER_MEAN = np.array(_sp['mean'], dtype=np.float32)
+        SCALER_STD  = np.array(_sp['std'],  dtype=np.float32)
+        _scaler_loaded = True
+    except Exception:
+        pass
+
+if not _scaler_loaded:
+    # Hardcoded fallback (from retrain_xgb_cbc.py output on local data)
+    SCALER_MEAN = np.array([
+        40.2588,  # HCT
+        13.6249,  # HGB
+        29.1812,  # MCH
+        33.4416,  # MCHC
+        86.1935,  # MCV
+         7.9689,  # MPV
+       266.3048,  # PLT
+         4.6239,  # RBC
+        13.0326,  # RDW
+         7.1914,  # WBC
+    ], dtype=np.float32)
+    SCALER_STD = np.array([
+        6.0594,   # HCT
+        2.0891,   # HGB
+        3.9614,   # MCH
+        3.7026,   # MCHC
+       11.1434,   # MCV
+        1.2565,   # MPV
+       79.0387,   # PLT
+        0.6875,   # RBC
+        1.9056,   # RDW
+        2.9998,   # WBC
+    ], dtype=np.float32)
+
+def scale_patient(patient_df: pd.DataFrame) -> pd.DataFrame:
+    """Scale CBC features using training StandardScaler parameters."""
+    arr = patient_df[CBC_FEATURES].values.astype(np.float32)
+    scaled = (arr - SCALER_MEAN) / (SCALER_STD + 1e-8)
+    return pd.DataFrame(scaled, columns=CBC_FEATURES)
+
 
 # ── Clinical Presets ──────────────────────────────────────────────────────────
 PRESETS = {
@@ -529,7 +588,7 @@ with tabs[0]:
         # ── CBC / Tabular prediction ─────────────────────────────────────────
         if tab_ok:
             try:
-                tab_prob  = float(tab_model.predict_proba(patient_df)[0, 1])
+                tab_prob  = float(tab_model.predict_proba(scale_patient(patient_df))[0, 1])
                 tab_label = "Anemic" if tab_prob >= 0.5 else "Non-Anemic"
             except Exception as e:
                 st.error(f"CBC model error: {e}")
@@ -790,7 +849,7 @@ with tabs[1]:
         if st.button("📊 Compute SHAP Explanation", type="primary", key="btn_shap"):
             with st.spinner("Computing SHAP values…"):
                 try:
-                    top_df, shap_fig = run_shap(tab_model if tab_ok else None, p_df)
+                    top_df, shap_fig = run_shap(tab_model if tab_ok else None, scale_patient(p_df) if tab_ok else p_df)
                     st.session_state['shap_result'] = (top_df, shap_fig)
                     st.session_state['shap_computed'] = True
                 except Exception as e:
@@ -876,8 +935,8 @@ with tabs[2]:
     if st.button("🔮 Simulate", type="primary", use_container_width=True):
         if tab_ok:
             try:
-                base_prob = float(tab_model.predict_proba(base_df)[0, 1])
-                sim_prob  = float(tab_model.predict_proba(sim_df)[0, 1])
+                base_prob = float(tab_model.predict_proba(scale_patient(base_df))[0, 1])
+                sim_prob  = float(tab_model.predict_proba(scale_patient(sim_df))[0, 1])
             except Exception:
                 base_prob = 0.85 if curr.get('HGB',12.) < 11 else 0.08
                 sim_prob  = 0.85 if s_hgb < 11 else 0.08
@@ -1117,7 +1176,7 @@ with tabs[4]:
             p_df_shap = pd.DataFrame([patient_inputs])[FEATURES]
             shap_rows = [["Feature","Value","SHAP","Direction"]]
             try:
-                td, _ = run_shap(tab_model if tab_ok else None, p_df_shap)
+                td, _ = run_shap(tab_model if tab_ok else None, scale_patient(p_df_shap) if tab_ok else p_df_shap)
                 for _, r in td.head(6).iterrows():
                     shap_rows.append([r['Feature'], f"{r['Patient Value']:.2f}",
                                       f"{r['SHAP Value']:+.3f}", r['Direction']])
