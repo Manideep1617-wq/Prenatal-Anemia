@@ -18,7 +18,11 @@ import streamlit as st
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-import cv2
+try:
+    import cv2
+    CV2_OK = True
+except ImportError:
+    CV2_OK = False
 
 # ── Project root on path ──────────────────────────────────────────────────────
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -140,19 +144,20 @@ fusion_ok = fusion_model is not None
 
 # ── Grad-CAM (inline, no import issues) ──────────────────────────────────────
 def run_gradcam(model, pil_img, device):
-    """Returns (heatmap_np, overlay_pil)."""
+    """Returns (heatmap_np, overlay_pil). Works with or without cv2."""
     orig = pil_img.convert("RGB")
     ow, oh = orig.size
     inp = IMG_TRANSFORM(orig).unsqueeze(0).to(device)
     inp.requires_grad_(True)
 
     acts, grads = [], []
-    hs = [
-        model.backbone.layer4.register_forward_hook(lambda m,i,o: acts.append(o)),
-        model.backbone.layer4.register_full_backward_hook(lambda m,gi,go: grads.append(go[0]))
-        if hasattr(model.backbone.layer4, "register_full_backward_hook")
-        else model.backbone.layer4.register_backward_hook(lambda m,gi,go: grads.append(go[0]))
-    ]
+    layer = model.backbone.layer4
+    hs = [layer.register_forward_hook(lambda m, i, o: acts.append(o))]
+    if hasattr(layer, "register_full_backward_hook"):
+        hs.append(layer.register_full_backward_hook(lambda m, gi, go: grads.append(go[0])))
+    else:
+        hs.append(layer.register_backward_hook(lambda m, gi, go: grads.append(go[0])))
+
     try:
         model.eval()
         with torch.enable_grad():
@@ -161,23 +166,32 @@ def run_gradcam(model, pil_img, device):
             cls = out.argmax(1).item()
             out[0, cls].backward()
 
-        act = acts[0]              # (1, C, H, W)
-        grd = grads[0]             # (1, C, H, W)
-        weights = grd.mean(dim=(2,3), keepdim=True)
+        act = acts[0]
+        grd = grads[0]
+        weights = grd.mean(dim=(2, 3), keepdim=True)
         cam = torch.relu((weights * act).sum(dim=1, keepdim=True)).squeeze()
         cam = cam.detach().cpu().numpy()
 
         mn, mx = cam.min(), cam.max()
-        cam = (cam - mn) / (mx - mn + 1e-8)
-        cam_resized = cv2.resize(cam.astype(np.float32), (ow, oh), interpolation=cv2.INTER_LINEAR)
-        cam_resized = np.clip(cam_resized, 0, 1)
+        cam_norm = (cam - mn) / (mx - mn + 1e-8)
 
-        heatmap_u8 = np.uint8(255 * cam_resized)
-        heatmap_bgr = cv2.applyColorMap(heatmap_u8, cv2.COLORMAP_JET)
-        heatmap_rgb = cv2.cvtColor(heatmap_bgr, cv2.COLOR_BGR2RGB)
+        if CV2_OK:
+            cam_resized = cv2.resize(cam_norm.astype(np.float32), (ow, oh),
+                                     interpolation=cv2.INTER_LINEAR)
+            cam_resized = np.clip(cam_resized, 0, 1)
+            heatmap_u8  = np.uint8(255 * cam_resized)
+            heatmap_bgr = cv2.applyColorMap(heatmap_u8, cv2.COLORMAP_JET)
+            heatmap_rgb = cv2.cvtColor(heatmap_bgr, cv2.COLOR_BGR2RGB)
+        else:
+            # PIL-only fallback: bilinear resize + jet colormap via matplotlib
+            from PIL import Image as PILImage
+            import matplotlib.cm as mcm
+            cam_pil = PILImage.fromarray(np.uint8(255 * cam_norm)).resize((ow, oh), PILImage.BILINEAR)
+            cam_resized = np.array(cam_pil) / 255.0
+            heatmap_rgb = np.uint8(mcm.jet(cam_resized)[:, :, :3] * 255)
 
-        orig_np = np.array(orig, dtype=np.float32)
-        overlay_np = np.clip(0.45 * heatmap_rgb + 0.55 * orig_np, 0, 255).astype(np.uint8)
+        orig_np     = np.array(orig, dtype=np.float32)
+        overlay_np  = np.clip(0.45 * heatmap_rgb + 0.55 * orig_np, 0, 255).astype(np.uint8)
         return cam_resized, Image.fromarray(overlay_np)
     finally:
         for h in hs:
