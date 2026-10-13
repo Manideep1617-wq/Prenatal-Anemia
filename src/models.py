@@ -104,6 +104,7 @@ class TransformerFusionModel(nn.Module):
     def __init__(self, tab_input_dim, img_embed_dim=512, num_classes=4,
                  transformer_dim=256, nhead=4, num_layers=2, dropout=0.3):
         super().__init__()
+        self.transformer_dim = transformer_dim
         # Tabular encoder
         self.tab_encoder = nn.Sequential(
             nn.Linear(tab_input_dim, 128),
@@ -111,6 +112,12 @@ class TransformerFusionModel(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(128, 64),
             nn.ReLU(),
+        )
+        # Project tabular embedding (64) → transformer_dim  (learnable, in __init__)
+        self.tab_proj = nn.Sequential(
+            nn.Linear(64, transformer_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
         )
         # Image encoder (ResNet‑18)
         weights = tv_models.ResNet18_Weights.DEFAULT
@@ -123,13 +130,16 @@ class TransformerFusionModel(nn.Module):
             nn.Dropout(dropout),
         )
         # Positional encoding (learnable)
-        self.pos_embedding = nn.Parameter(torch.randn(2, transformer_dim))
-        # Transformer encoder
-        encoder_layer = nn.TransformerEncoderLayer(d_model=transformer_dim,
-                                                   nhead=nhead,
-                                                   dim_feedforward=transformer_dim*4,
-                                                   dropout=dropout,
-                                                   activation='gelu')
+        self.pos_embedding = nn.Parameter(torch.randn(1, 2, transformer_dim))
+        # Transformer encoder  (batch_first=True for clarity)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=transformer_dim,
+            nhead=nhead,
+            dim_feedforward=transformer_dim * 4,
+            dropout=dropout,
+            activation='gelu',
+            batch_first=True,
+        )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         # Classification head
         self.classifier = nn.Sequential(
@@ -142,15 +152,13 @@ class TransformerFusionModel(nn.Module):
     def forward(self, tab_x, img_x):
         # Encode each modality
         tab_feat = self.tab_encoder(tab_x)                 # (B, 64)
-        img_feat = self.img_backbone(img_x)               # (B, 512)
-        img_feat = self.img_proj(img_feat)                # (B, transformer_dim)
-        # Project tabular features to transformer_dim
-        tab_proj = nn.Linear(tab_feat.size(1), img_feat.size(1)).to(tab_feat.device)
-        tab_feat_proj = tab_proj(tab_feat)                # (B, transformer_dim)
-        seq = torch.stack([tab_feat_proj, img_feat], dim=1)  # (B, 2, transformer_dim)
-        seq = seq + self.pos_embedding                     # broadcast positional encodings
-        seq = seq.transpose(0, 1)                         # (2, B, D) for transformer
-        transformed = self.transformer(seq)               # (2, B, D)
-        cls_token = transformed[0]                        # (B, D)
-        out = self.classifier(cls_token)                  # (B, num_classes)
+        tab_feat = self.tab_proj(tab_feat)                 # (B, transformer_dim)
+        img_feat = self.img_backbone(img_x)                # (B, 512)
+        img_feat = self.img_proj(img_feat)                 # (B, transformer_dim)
+        # Build sequence of 2 tokens: [tabular, image]
+        seq = torch.stack([tab_feat, img_feat], dim=1)     # (B, 2, transformer_dim)
+        seq = seq + self.pos_embedding                     # learnable positional encoding
+        transformed = self.transformer(seq)                # (B, 2, D)
+        cls_token = transformed[:, 0, :]                   # (B, D) — first token
+        out = self.classifier(cls_token)                   # (B, num_classes)
         return out
