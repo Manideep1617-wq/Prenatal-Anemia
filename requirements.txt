@@ -13,3 +13,4 @@ Pillow>=10.0.0
 scikit-learn>=1.4.0
 matplotlib>=3.7.0
 seaborn>=0.13.0
+reportlab>=4.0.0
