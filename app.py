@@ -30,6 +30,11 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
+from src.inference import (
+    positive_class_probability,
+    screening_assessment,
+)
+
 # ── Optional SHAP import ───────────────────────────────────────────────────────
 try:
     import shap
@@ -43,18 +48,13 @@ st.set_page_config(page_title="Prenatal Anemia Screening", page_icon="🩺", lay
 # ── Paths ─────────────────────────────────────────────────────────────────────
 RESULTS_DIR     = os.path.join(BASE_DIR, "results")
 CHECKPOINTS_DIR = os.path.join(RESULTS_DIR, "checkpoints")
-FIGURES_DIR     = os.path.join(RESULTS_DIR, "figures")
 METRICS_PATH    = os.path.join(RESULTS_DIR, "metrics.json")
 
 TAB_MODEL_PATH    = os.path.join(CHECKPOINTS_DIR, "xgb_tabular.json")
 IMG_MODEL_PATH    = os.path.join(CHECKPOINTS_DIR, "image_model_best.pt")
-FUSION_MODEL_PATH = os.path.join(CHECKPOINTS_DIR, "fusion_transformer.pt")
 
 # ── Features (alphabetical — must match training) ────────────────────────────
 # ── All 17 display features (for UI inputs) ───────────────────────────────────
-ALL_FEATURES = ['Age','BMI','BS','Body Temp','Diastolic','HCT','HGB',
-                'Heart Rate','MCH','MCHC','MCV','MPV','PLT','RBC','RDW','Systolic BP','WBC']
-
 # ── CBC features used by the XGBoost model (10, alphabetical) ─────────────────
 # Model was retrained on CBC-only data — maternal vitals are shown in UI but
 # NOT passed to the model (they weren't in the training data).
@@ -65,49 +65,33 @@ FEATURES = CBC_FEATURES
 
 # ── Load scaler params from saved JSON (produced by retrain_xgb_cbc.py) ──────
 _SCALER_PATH = os.path.join(CHECKPOINTS_DIR, "scaler_params.json")
-_scaler_loaded = False
 SCALER_MEAN = None
 SCALER_STD  = None
+SCALER_ERROR = None
 
 if os.path.exists(_SCALER_PATH):
     try:
-        with open(_SCALER_PATH) as f:
+        with open(_SCALER_PATH, encoding="utf-8") as f:
             _sp = json.load(f)
-        SCALER_MEAN = np.array(_sp['mean'], dtype=np.float32)
-        SCALER_STD  = np.array(_sp['std'],  dtype=np.float32)
-        _scaler_loaded = True
-    except Exception:
-        pass
-
-if not _scaler_loaded:
-    # Hardcoded fallback (from retrain_xgb_cbc.py output on local data)
-    SCALER_MEAN = np.array([
-        40.2588,  # HCT
-        13.6249,  # HGB
-        29.1812,  # MCH
-        33.4416,  # MCHC
-        86.1935,  # MCV
-         7.9689,  # MPV
-       266.3048,  # PLT
-         4.6239,  # RBC
-        13.0326,  # RDW
-         7.1914,  # WBC
-    ], dtype=np.float32)
-    SCALER_STD = np.array([
-        6.0594,   # HCT
-        2.0891,   # HGB
-        3.9614,   # MCH
-        3.7026,   # MCHC
-       11.1434,   # MCV
-        1.2565,   # MPV
-       79.0387,   # PLT
-        0.6875,   # RBC
-        1.9056,   # RDW
-        2.9998,   # WBC
-    ], dtype=np.float32)
+        if _sp.get('features') != CBC_FEATURES:
+            raise ValueError("Scaler feature order does not match the deployed CBC model")
+        SCALER_MEAN = np.asarray(_sp['mean'], dtype=np.float32)
+        SCALER_STD = np.asarray(_sp['std'], dtype=np.float32)
+        if (SCALER_MEAN.shape != (len(CBC_FEATURES),)
+                or SCALER_STD.shape != (len(CBC_FEATURES),)
+                or not np.isfinite(SCALER_MEAN).all()
+                or not np.isfinite(SCALER_STD).all()
+                or np.any(SCALER_STD <= 0)):
+            raise ValueError("Scaler statistics are missing or invalid")
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        SCALER_ERROR = f"Could not load CBC scaler: {exc}"
+else:
+    SCALER_ERROR = "CBC scaler file is missing; the tabular model cannot be used safely."
 
 def scale_patient(patient_df: pd.DataFrame) -> pd.DataFrame:
     """Scale CBC features using training StandardScaler parameters."""
+    if SCALER_MEAN is None or SCALER_STD is None:
+        raise RuntimeError(SCALER_ERROR or "CBC scaler is unavailable")
     arr = patient_df[CBC_FEATURES].values.astype(np.float32)
     scaled = (arr - SCALER_MEAN) / (SCALER_STD + 1e-8)
     return pd.DataFrame(scaled, columns=CBC_FEATURES)
@@ -160,18 +144,31 @@ class ImageModel(nn.Module):
 @st.cache_resource(show_spinner="Loading AI models…")
 def load_models():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    tab_model = img_model = fusion_model = None
+    tab_model = img_model = None
+    load_errors = []
 
     # Tabular — try both locations
-    for p in [TAB_MODEL_PATH, os.path.join(RESULTS_DIR, "xgb_tabular.json")]:
-        if os.path.exists(p):
-            try:
-                m = xgb.XGBClassifier()
-                m.load_model(p)
-                tab_model = m
-                break
-            except Exception as e:
-                pass  # try next
+    if SCALER_ERROR:
+        load_errors.append(SCALER_ERROR)
+    else:
+        for p in [TAB_MODEL_PATH, os.path.join(RESULTS_DIR, "xgb_tabular.json")]:
+            if os.path.exists(p):
+                try:
+                    m = xgb.XGBClassifier()
+                    m.load_model(p)
+                    if m.get_booster().num_features() != len(CBC_FEATURES):
+                        raise ValueError(
+                            f"Expected {len(CBC_FEATURES)} CBC features, "
+                            f"found {m.get_booster().num_features()}"
+                        )
+                    tab_model = m
+                    break
+                except Exception as exc:
+                    load_errors.append(f"Could not load tabular model {os.path.basename(p)}: {exc}")
+        if tab_model is None and not any(os.path.exists(p) for p in [
+            TAB_MODEL_PATH, os.path.join(RESULTS_DIR, "xgb_tabular.json")
+        ]):
+            load_errors.append("CBC model checkpoint was not found.")
 
     # Image
     if os.path.exists(IMG_MODEL_PATH):
@@ -181,28 +178,17 @@ def load_models():
             m.load_state_dict(state)
             m.to(device).eval()
             img_model = m
-        except Exception as e:
-            pass  # img_model stays None
+        except Exception as exc:
+            load_errors.append(f"Could not load image model checkpoint: {exc}")
+    else:
+        load_errors.append("Image model checkpoint was not found.")
 
-    # Fusion (optional neural — falls back to weighted ensemble in app logic)
-    if os.path.exists(FUSION_MODEL_PATH):
-        try:
-            from src.models import TransformerFusionModel
-            m = TransformerFusionModel(tab_input_dim=len(FEATURES), num_classes=2)
-            state = torch.load(FUSION_MODEL_PATH, map_location=device, weights_only=True)
-            m.load_state_dict(state)
-            m.to(device).eval()
-            fusion_model = m
-        except Exception:
-            pass
+    return tab_model, img_model, device, load_errors
 
-    return tab_model, img_model, fusion_model, device
-
-tab_model, img_model, fusion_model, device = load_models()
+tab_model, img_model, device, model_load_errors = load_models()
 
 tab_ok    = tab_model    is not None
 img_ok    = img_model    is not None
-fusion_ok = fusion_model is not None
 
 # ── Grad-CAM (inline, no import issues) ───────────────────────────────────────
 def run_gradcam(model, pil_img, device):
@@ -272,63 +258,42 @@ def run_gradcam(model, pil_img, device):
         model.eval()
 
 # ── SHAP explanation (inline, robust) ─────────────────────────────────────────
-def run_shap(model, patient_df):
-    """Returns (top_df, fig). Works with xgb.XGBClassifier."""
-    sv = None
+def run_shap(model, patient_df, display_patient_df=None):
+    """Return actual tree SHAP attributions in a table and plot."""
+    if model is None:
+        raise RuntimeError("The trained CBC model is unavailable.")
+    if not SHAP_AVAILABLE:
+        raise RuntimeError("SHAP is not installed.")
+
     try:
-        if SHAP_AVAILABLE and model is not None:
-            explainer = shap.TreeExplainer(model)
-            raw = explainer.shap_values(patient_df)
-            # raw can be: list of arrays, 2D array, 3D array, or Explanation object
-            if isinstance(raw, list):
-                sv = np.array(raw[1] if len(raw) > 1 else raw[0]).flatten()
-            elif hasattr(raw, 'values'):   # SHAP Explanation object
-                arr = raw.values
-                if arr.ndim == 3:
-                    sv = arr[0, :, 1]
-                elif arr.ndim == 2:
-                    sv = arr[0]
-                else:
-                    sv = arr.flatten()
+        explainer = shap.TreeExplainer(model)
+        raw = explainer.shap_values(patient_df)
+        if isinstance(raw, list):
+            sv = np.asarray(raw[1] if len(raw) > 1 else raw[0]).flatten()
+        elif hasattr(raw, 'values'):
+            arr = np.asarray(raw.values)
+            if arr.ndim == 3:
+                sv = arr[0, :, 1]
+            elif arr.ndim == 2:
+                sv = arr[0]
             else:
-                arr = np.array(raw)
-                if arr.ndim == 3:
-                    sv = arr[0, :, 1]
-                elif arr.ndim == 2:
-                    sv = arr[0]
-                else:
-                    sv = arr.flatten()
-    except Exception:
-        sv = None
+                sv = arr.flatten()
+        else:
+            arr = np.asarray(raw)
+            if arr.ndim == 3:
+                sv = arr[0, :, 1]
+            elif arr.ndim == 2:
+                sv = arr[0]
+            else:
+                sv = arr.flatten()
+    except Exception as exc:
+        raise RuntimeError(f"Could not compute SHAP values: {exc}") from exc
 
     feature_names = list(patient_df.columns)
-    patient_vals  = patient_df.iloc[0].to_dict()
-
-    # Fallback: clinical heuristic attributions
-    if sv is None or len(sv) != len(feature_names):
-        NORMS = {'HGB':12.,'HCT':36.,'RBC':4.5,'MCV':85.,'MCH':30.,
-                 'MCHC':33.,'RDW':13.,'WBC':7.5,'PLT':250.,'Age':28.,
-                 'BMI':23.,'BS':5.,'Body Temp':98.4,'Diastolic':70.,
-                 'Heart Rate':75.,'Systolic BP':110.,'MPV':8.5}
-        hgb   = patient_vals.get('HGB', 12.)
-        scale = 1.5 if hgb < 11 else 0.3
-        sv = []
-        for f in feature_names:
-            norm = NORMS.get(f, 0.)
-            val  = patient_vals.get(f, norm)
-            if f == 'HGB':
-                sv.append((norm - val) * 0.4)
-            elif f == 'HCT':
-                sv.append((norm - val) * 0.15)
-            elif f == 'RBC':
-                sv.append((norm - val) * 0.25)
-            elif f in ('MCV','MCH','MCHC'):
-                sv.append((norm - val) * 0.04)
-            elif f == 'RDW':
-                sv.append((val - norm) * 0.08)
-            else:
-                sv.append((norm - val) * 0.02)
-        sv = np.array(sv) * scale
+    display_patient_df = display_patient_df if display_patient_df is not None else patient_df
+    patient_vals = display_patient_df.iloc[0].to_dict()
+    if len(sv) != len(feature_names):
+        raise RuntimeError("SHAP returned a different number of values than model features.")
 
     records = []
     for feat, shap_val, pat_val in zip(feature_names, sv,
@@ -351,8 +316,8 @@ def run_shap(model, patient_df):
     colors_bar  = ['#e74c3c' if v > 0 else '#2ecc71' for v in plot_df['SHAP Value']]
     ax.barh(plot_df['Feature'], plot_df['SHAP Value'], color=colors_bar, height=0.65)
     ax.axvline(0, color='#555', linestyle='--', linewidth=1)
-    ax.set_xlabel('SHAP Attribution (impact on anemia risk)', fontsize=9)
-    ax.set_title('Top Clinical Feature Drivers', fontsize=11, fontweight='bold')
+    ax.set_xlabel('SHAP value (model output scale)', fontsize=9)
+    ax.set_title('Top Clinical Feature Drivers (SHAP)', fontsize=11, fontweight='bold')
     ax.grid(axis='x', linestyle=':', alpha=0.5)
     from matplotlib.patches import Patch
     ax.legend(handles=[
@@ -419,14 +384,19 @@ if 'shap_result' not in st.session_state:
 # ═══════════════════════════ SIDEBAR ══════════════════════════════════════════
 with st.sidebar:
     st.markdown("## 🩺 Prenatal Anemia AI")
-    st.markdown("Dual-branch multimodal triage: **CBC + vitals** × **eye/nail images**.")
+    st.markdown("CBC-based screening with an optional **adjunctive eye/nail image score**.")
     st.divider()
     st.markdown("### 🔍 Model Status")
     st.markdown(f"**Tabular (XGBoost):** {'✅ Loaded' if tab_ok else '❌ Not found'}")
     st.markdown(f"**Image (ResNet-18):** {'✅ Loaded' if img_ok else '❌ Not found'}")
-    st.markdown(f"**Fusion:** {'✅ Neural' if fusion_ok else 'ℹ️ Weighted ensemble'}")
+    st.markdown("**Final assessment:** WHO HGB threshold (CBC)")
+    st.markdown("**Fusion model:** Not used — no validated deployed fusion checkpoint")
+    if model_load_errors:
+        with st.expander("Model loading details"):
+            for load_error in model_load_errors:
+                st.warning(load_error)
     st.divider()
-    st.markdown(f"**SHAP:** {'✅ Available' if SHAP_AVAILABLE else '⚠️ Not installed (heuristic mode)'}")
+    st.markdown(f"**SHAP:** {'✅ Available' if SHAP_AVAILABLE else '⚠️ Not installed'}")
     st.markdown(f"**Grad-CAM:** {'✅ cv2 available' if CV2_OK else 'ℹ️ Matplotlib fallback'}")
     st.markdown(f"**Device:** `{device}`")
     st.divider()
@@ -435,7 +405,7 @@ with st.sidebar:
 
 # ═══════════════════════════ HEADER ═══════════════════════════════════════════
 st.markdown('<p class="main-title">🩺 Prenatal Anemia Multimodal Screening</p>', unsafe_allow_html=True)
-st.markdown('<p class="sub-title">Dual-branch multimodal AI triage for early maternal anemia detection</p>', unsafe_allow_html=True)
+st.markdown('<p class="sub-title">WHO HGB screening supported by a CBC model score and an optional adjunctive image score</p>', unsafe_allow_html=True)
 
 # ═══════════════════════════ TABS ═════════════════════════════════════════════
 tabs = st.tabs(["🩺 Prediction", "🧠 Explainability", "📊 What-If Simulator",
@@ -449,6 +419,7 @@ with tabs[0]:
 
     with col_L:
         st.subheader("1️⃣ Clinical & Hematological Parameters")
+        st.caption("The deployed XGBoost model uses the 10 CBC values only. Maternal vitals below are recorded for context; the WHO screening category is determined by HGB.")
 
         # ── Preset selector ──────────────────────────────────────────────────
         pc1, pc2 = st.columns([2, 1])
@@ -551,6 +522,7 @@ with tabs[0]:
                 st.session_state['current_image'] = active_img
                 st.image(active_img, caption="Uploaded Image", use_container_width=True)
             except Exception as e:
+                st.session_state['current_image'] = None
                 st.error(f"Image load error: {e}")
         elif chosen != "None" and chosen in sample_map:
             try:
@@ -574,7 +546,7 @@ with tabs[0]:
     has_image = pil_img is not None and img_ok
 
     if has_image:
-        mode_label = "🔀 Multimodal (Image + CBC)"
+        mode_label = "🩺 CBC assessment + adjunctive image score"
     else:
         mode_label = "🧪 CBC-Only Mode"
 
@@ -583,149 +555,121 @@ with tabs[0]:
     if st.button("🚀 Run Prediction", type="primary", use_container_width=True):
 
         tab_prob = img_prob = None
-        tab_label = img_label = "N/A"
+        img_label = "N/A"
+        tab_model_label = "N/A"
+        model_error = None
 
         # ── CBC / Tabular prediction ─────────────────────────────────────────
         if tab_ok:
             try:
-                tab_prob  = float(tab_model.predict_proba(scale_patient(patient_df))[0, 1])
-                tab_label = "Anemic" if tab_prob >= 0.5 else "Non-Anemic"
+                tab_prob = positive_class_probability(tab_model, scale_patient(patient_df))
+                tab_model_label = "Anemic" if tab_prob >= 0.5 else "Non-Anemic"
             except Exception as e:
                 st.error(f"CBC model error: {e}")
-                # WHO fallback
-                tab_prob  = 0.9 if hgb < 7 else (0.7 if hgb < 10 else (0.4 if hgb < 11 else 0.05))
-                tab_label = "Anemic" if tab_prob >= 0.5 else "Non-Anemic"
-        else:
-            # WHO-rule fallback
-            tab_prob  = 0.9 if hgb < 7 else (0.7 if hgb < 10 else (0.4 if hgb < 11 else 0.05))
-            tab_label = "Anemic" if tab_prob >= 0.5 else "Non-Anemic"
-            st.info("ℹ️ Using WHO HGB threshold rule (model not loaded).")
-
+                model_error = str(e)
         # ── Image prediction ─────────────────────────────────────────────────
         if has_image:
             img_prob, img_label = predict_image(pil_img)
             if img_prob is None:
-                st.warning("⚠️ Image inference failed — falling back to CBC-only.")
+                st.warning("⚠️ Image inference failed; the WHO assessment is unchanged.")
 
-        # ── Fusion / final probability ───────────────────────────────────────
-        if tab_prob is not None and img_prob is not None:
-            fusion_prob = 0.60 * tab_prob + 0.40 * img_prob
-            agreement   = max(0., min(100., (1 - abs(img_prob - tab_prob)) * 100))
-            agree_flag  = (tab_label == img_label)
-            final_prob  = fusion_prob
-        elif tab_prob is not None:
-            fusion_prob = None
-            agreement   = 100.
-            agree_flag  = True
-            final_prob  = tab_prob
-        elif img_prob is not None:
-            fusion_prob = None
-            agreement   = 100.
-            agree_flag  = True
-            final_prob  = img_prob
-        else:
-            final_prob  = 0.5
-            fusion_prob = None
-            agreement   = 0.
-            agree_flag  = False
+        # An image-only signal never overrides the validated CBC/WHO assessment.
+        assessment = screening_assessment(hgb, tab_prob, img_prob)
+        final_label = assessment["label"]
+        agreement = assessment["modality_agreement"]
+        agree_flag = (
+            tab_model_label == img_label
+            if tab_prob is not None and img_prob is not None
+            else None
+        )
 
-        final_label = "Anemic" if final_prob >= 0.5 else "Non-Anemic"
-
-        # ── Severity (WHO) ───────────────────────────────────────────────────
-        if final_label == "Anemic":
-            if hgb >= 10.:  sev, sev_cls = "Mild Anemia",     "sev-mild"
-            elif hgb >= 7.: sev, sev_cls = "Moderate Anemia", "sev-moderate"
-            else:           sev, sev_cls = "Severe Anemia",   "sev-severe"
-        else:
-            sev, sev_cls = "Normal / Non-Anemic", "sev-normal"
+        # Severity is determined directly from HGB, including the normal range.
+        sev = assessment["severity"]
+        sev_cls = (
+            "sev-severe" if sev == "Severe Anemia"
+            else "sev-moderate" if sev == "Moderate Anemia"
+            else "sev-mild" if sev == "Mild Anemia"
+            else "sev-normal"
+        )
 
         # Save to session state
         st.session_state['prediction_results'] = {
-            'tab_prob':tab_prob, 'tab_label':tab_label,
+            'tab_prob':tab_prob,
+            'tab_model_label':tab_model_label, 'model_error':model_error,
             'img_prob':img_prob, 'img_label':img_label,
-            'fusion_prob':fusion_prob, 'fusion_label':final_label,
-            'final_prob':final_prob, 'agreement_pct':agreement,
-            'models_agree':agree_flag, 'severity':sev, 'hgb':hgb
+            'assessment_label':final_label,
+            'agreement_pct':agreement,
+            'models_agree':agree_flag, 'severity':sev, 'hgb':hgb,
+            'patient_inputs':patient_dict.copy()
         }
         # Reset SHAP cache so Explainability tab recomputes
         st.session_state['shap_computed'] = False
         st.session_state['shap_result'] = None
+        st.session_state['shap_patient_inputs'] = None
 
         # ── Results panel ────────────────────────────────────────────────────
         st.write("")
+        if tab_prob is not None and tab_model_label != final_label:
+            st.warning(
+                f"CBC model classification ({tab_model_label}) differs from the "
+                f"WHO HGB assessment ({final_label}); the final category follows HGB."
+            )
 
         if tab_prob is not None and img_prob is not None:
             rc1, rc2, rc3 = st.columns(3)
             with rc1:
-                color = "#e74c3c" if tab_label == "Anemic" else "#22c55e"
+                color = "#e74c3c" if tab_model_label == "Anemic" else "#22c55e"
                 st.markdown(f"""<div class="sim-card">
-                <h4>🧪 CBC Model</h4>
+                <h4>🧪 CBC Model Score</h4>
                 <div style="font-size:2rem;font-weight:800;color:{color}">{tab_prob:.1%}</div>
-                <div><b>{tab_label}</b></div></div>""", unsafe_allow_html=True)
+                <div><b>Model prediction: {tab_model_label}</b></div></div>""", unsafe_allow_html=True)
             with rc2:
                 color = "#e74c3c" if img_label == "Anemic" else "#22c55e"
                 st.markdown(f"""<div class="sim-card">
-                <h4>🖼️ Image Model</h4>
+                <h4>🖼️ Image Model (adjunct)</h4>
                 <div style="font-size:2rem;font-weight:800;color:{color}">{img_prob:.1%}</div>
                 <div><b>{img_label}</b></div></div>""", unsafe_allow_html=True)
             with rc3:
                 color = "#e74c3c" if final_label == "Anemic" else "#22c55e"
                 st.markdown(f"""<div class="sim-card">
-                <h4>🔀 Fusion (Final)</h4>
-                <div style="font-size:2rem;font-weight:800;color:{color}">{final_prob:.1%}</div>
-                <div><b>{final_label}</b></div></div>""", unsafe_allow_html=True)
+                <h4>🩺 WHO HGB Assessment</h4>
+                <div style="font-size:1.5rem;font-weight:800;color:{color}">{final_label}</div>
+                <div><b>{sev}</b></div></div>""", unsafe_allow_html=True)
 
             st.write("")
-            filled = max(0, min(10, round(agreement / 10)))
+            filled = max(0, min(10, round(agreement / 10))) if agreement is not None else 0
             bar = "█" * filled + "░" * (10 - filled)
             st.markdown(f"""<div class="confidence-panel">
-              <div>🧪 CBC MODEL    → Anemic: {tab_prob*100:.1f}%  ({tab_label})</div>
+              <div>🧪 CBC MODEL    → Anemic: {tab_prob*100:.1f}%  ({tab_model_label})</div>
               <div>🖼️  IMAGE MODEL  → Anemic: {img_prob*100:.1f}%  ({img_label})</div>
-              <div class="confidence-fusion">🔀 FUSION FINAL → Anemic: {final_prob*100:.1f}%  ({final_label})  ← Final</div>
-              <div class="confidence-highlight">Modality Agreement: {bar} {agreement:.0f}%</div>
+              <div class="confidence-fusion">🩺 WHO HGB ASSESSMENT → {final_label} ({sev})  ← Final</div>
+              <div class="confidence-highlight">Modality score agreement: {bar} {agreement:.0f}%</div>
             </div>""", unsafe_allow_html=True)
             st.write("")
             if agree_flag:
-                st.markdown('<div class="banner-agree">✅ Both modalities agree on this prediction.</div>', unsafe_allow_html=True)
+                st.markdown('<div class="banner-agree">✅ CBC and image model predictions agree; WHO HGB assessment remains the final screening category.</div>', unsafe_allow_html=True)
             else:
-                st.markdown('<div class="banner-disagree">⚠️ Modalities disagree — CBC result is more reliable for clinical use.</div>', unsafe_allow_html=True)
+                st.markdown('<div class="banner-disagree">⚠️ CBC and image model predictions disagree — image output is adjunctive and does not override WHO HGB assessment.</div>', unsafe_allow_html=True)
 
         else:
-            # CBC-only or image-only
             if tab_prob is not None:
-                color = "#e74c3c" if tab_label == "Anemic" else "#22c55e"
-                rc1, rc2 = st.columns([1, 2])
-                with rc1:
-                    st.markdown(f"""<div class="sim-card">
-                    <h4>🧪 CBC Model Result</h4>
-                    <div style="font-size:2.4rem;font-weight:800;color:{color}">{tab_prob:.1%}</div>
-                    <div style="font-size:1.1rem"><b>{tab_label}</b></div>
-                    <div style="font-size:.85rem;color:#666">Anemia Risk Score</div></div>""",
-                    unsafe_allow_html=True)
-                with rc2:
-                    st.markdown(f"""<div class="confidence-panel">
-                      <div>🧪 CBC MODEL (XGBoost · 17 features)</div>
-                      <div class="confidence-fusion">   Anemia Risk: {tab_prob*100:.1f}%  →  <b>{tab_label}</b></div>
-                      <div class="confidence-highlight">   Mode: CBC-Only (no image provided)</div>
-                      <div>   HGB = {hgb:.1f} g/dL  |  WHO threshold: 11.0 g/dL</div>
-                    </div>""", unsafe_allow_html=True)
-            elif img_prob is not None:
+                st.metric("CBC model anemia score", f"{tab_prob:.1%}",
+                          help=f"Model classification: {tab_model_label}")
+            else:
+                st.info("CBC model score unavailable. The assessment below uses the WHO HGB threshold only.")
+            if img_prob is not None:
                 color = "#e74c3c" if img_label == "Anemic" else "#22c55e"
-                rc1, rc2 = st.columns([1, 2])
-                with rc1:
-                    st.markdown(f"""<div class="sim-card">
-                    <h4>🖼️ Image Model Result</h4>
-                    <div style="font-size:2.4rem;font-weight:800;color:{color}">{img_prob:.1%}</div>
-                    <div style="font-size:1.1rem"><b>{img_label}</b></div>
-                    <div style="font-size:.85rem;color:#666">Visual Anemia Score</div></div>""",
-                    unsafe_allow_html=True)
-                with rc2:
-                    st.markdown(f"""<div class="confidence-panel">
-                      <div>🖼️  IMAGE MODEL (ResNet-18 · Eye & Nail)</div>
-                      <div class="confidence-fusion">   Anemia Risk: {img_prob*100:.1f}%  →  <b>{img_label}</b></div>
-                      <div class="confidence-highlight">   Mode: Image-Only</div>
-                      <div>   ⚠️ For best accuracy, also enter CBC data above</div>
-                    </div>""", unsafe_allow_html=True)
+                st.markdown(f"""<div class="sim-card">
+                <h4>🖼️ Image Model (adjunct)</h4>
+                <div style="font-size:2rem;font-weight:800;color:{color}">{img_prob:.1%}</div>
+                <div><b>{img_label}</b></div></div>""", unsafe_allow_html=True)
+            color = "#e74c3c" if final_label == "Anemic" else "#22c55e"
+            st.markdown(f"""<div class="sim-card">
+            <h4>🩺 WHO HGB Assessment</h4>
+            <div style="font-size:1.5rem;font-weight:800;color:{color}">{final_label}</div>
+            <div><b>{sev}</b></div></div>""", unsafe_allow_html=True)
+            if model_error:
+                st.warning(f"CBC model is unavailable for this prediction: {model_error}")
 
         # ── Severity badge ───────────────────────────────────────────────────
         st.write("")
@@ -733,11 +677,11 @@ with tabs[0]:
         st.write("")
 
         if "Severe" in sev:
-            st.error("🚨 EMERGENCY: HGB < 7.0 g/dL — immediate hospital admission, IV iron or transfusion.")
+            st.error("🚨 URGENT: HGB < 7.0 g/dL — seek urgent obstetric/medical assessment. A clinician should determine treatment.")
         elif "Moderate" in sev:
-            st.warning("⚠️ HIGH PRIORITY: HGB 7–10 g/dL — obstetrician consult within 24–48 hrs + iron therapy.")
+            st.warning("⚠️ HIGH PRIORITY: HGB 7.0–9.9 g/dL — contact your obstetric clinician promptly for assessment and treatment planning.")
         elif "Mild" in sev:
-            st.info("📋 MONITOR: HGB 10–10.9 g/dL — oral iron + Vitamin C + dietary changes + 14-day recheck.")
+            st.info("📋 FOLLOW UP: HGB 10.0–10.9 g/dL — review the result with your obstetric clinician and discuss appropriate follow-up.")
         else:
             st.success("✅ HEALTHY: HGB ≥ 11.0 g/dL — maintain routine antenatal care and nutrition.")
 
@@ -746,8 +690,8 @@ with tabs[0]:
                 st.write(f"**CBC model:** Anemic={tab_prob:.4f}  Non-Anemic={1-tab_prob:.4f}")
             if img_prob is not None:
                 st.write(f"**Image model:** Anemic={img_prob:.4f}  Non-Anemic={1-img_prob:.4f}")
-            if fusion_prob is not None:
-                st.write(f"**Fusion (0.6×CBC + 0.4×Image):** Anemic={fusion_prob:.4f}")
+            if tab_prob is not None:
+                st.write(f"**CBC model classification:** {tab_model_label}")
             st.write(f"**HGB (WHO rule):** {hgb:.1f} g/dL → {'Anemic' if hgb < 11 else 'Normal'}")
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -755,7 +699,7 @@ with tabs[0]:
 # ═══════════════════════════════════════════════════════════════════════════════
 with tabs[1]:
     st.header("🧠 Model Explainability")
-    st.markdown("**Grad-CAM** visual saliency for image predictions · **SHAP** attributions for clinical features")
+    st.markdown("**Grad-CAM** visual saliency for image predictions · **SHAP** attributions for clinical features. Images are adjunctive and do not override the WHO HGB assessment.")
     st.divider()
 
     col_gc, col_sh = st.columns([1, 1.1], gap="large")
@@ -791,8 +735,12 @@ with tabs[1]:
                                                 type=["jpg","jpeg","png"],
                                                 key="exp_upload")
                 if uploaded_exp:
-                    pil_img_exp = Image.open(uploaded_exp).convert("RGB")
-                    st.session_state['current_image'] = pil_img_exp
+                    try:
+                        pil_img_exp = Image.open(uploaded_exp).convert("RGB")
+                        st.session_state['current_image'] = pil_img_exp
+                    except Exception as exc:
+                        st.session_state['current_image'] = None
+                        st.error(f"Image load error: {exc}")
 
                 if not pil_img_exp and len(sample_opts2) > 1:
                     chosen2 = st.selectbox("Or pick a sample:", sample_opts2, key="exp_sample")
@@ -831,35 +779,47 @@ with tabs[1]:
 
     # ── SHAP ──────────────────────────────────────────────────────────────────
     with col_sh:
-        st.subheader("📊 SHAP Feature Attribution")
+        st.subheader("📊 Clinical Feature Attribution")
 
         cur_inputs = st.session_state.get('patient_inputs', PRESETS["Normal (Healthy Pregnant)"])
         p_df = pd.DataFrame([cur_inputs])[FEATURES]
 
         if not tab_ok:
-            st.info("ℹ️ Tabular model not loaded — using clinical heuristic attributions.")
+            st.info("ℹ️ CBC model not loaded — model-based attributions are unavailable.")
 
         if not SHAP_AVAILABLE:
-            st.warning("⚠️ SHAP library not installed. Using clinical heuristic mode.")
+            st.warning("⚠️ SHAP is not installed. Model-based attributions are unavailable.")
 
         # Show current patient values
         with st.expander("Current Patient Values", expanded=False):
             st.dataframe(p_df.T.rename(columns={0: "Value"}), use_container_width=True)
 
-        if st.button("📊 Compute SHAP Explanation", type="primary", key="btn_shap"):
+        if st.button("📊 Compute SHAP Explanation", type="primary", key="btn_shap",
+                     disabled=not (tab_ok and SHAP_AVAILABLE)):
             with st.spinner("Computing SHAP values…"):
                 try:
-                    top_df, shap_fig = run_shap(tab_model if tab_ok else None, scale_patient(p_df) if tab_ok else p_df)
+                    top_df, shap_fig = run_shap(
+                        tab_model if tab_ok else None,
+                        scale_patient(p_df) if tab_ok else p_df,
+                        display_patient_df=p_df,
+                    )
                     st.session_state['shap_result'] = (top_df, shap_fig)
                     st.session_state['shap_computed'] = True
+                    st.session_state['shap_patient_inputs'] = p_df.iloc[0].to_dict()
                 except Exception as e:
                     st.error(f"SHAP computation error: {e}")
                     import traceback
                     st.code(traceback.format_exc())
 
         # Display SHAP result if available
-        if st.session_state.get('shap_computed') and st.session_state.get('shap_result'):
+        shap_matches_current = (
+            st.session_state.get('shap_patient_inputs') == p_df.iloc[0].to_dict()
+        )
+        if (st.session_state.get('shap_computed')
+                and st.session_state.get('shap_result')
+                and shap_matches_current):
             top_df, shap_fig = st.session_state['shap_result']
+            st.caption("SHAP values explain the CBC model output; patient values are displayed in their original clinical units.")
             st.pyplot(shap_fig, use_container_width=True)
             plt.close(shap_fig)
 
@@ -888,7 +848,9 @@ with tabs[1]:
                 .background_gradient(subset=['SHAP Value'], cmap='RdYlGn_r'),
                 use_container_width=True
             )
-        elif not st.session_state.get('shap_computed'):
+        elif st.session_state.get('shap_computed') and not shap_matches_current:
+            st.info("Inputs changed since this explanation was generated. Recompute it to see current attributions.")
+        else:
             st.info("👆 Click **Compute SHAP Explanation** to see feature attributions for the current patient values.")
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -933,48 +895,30 @@ with tabs[2]:
     base_df = pd.DataFrame([curr])[FEATURES]
 
     if st.button("🔮 Simulate", type="primary", use_container_width=True):
+        baseline_hgb = float(curr.get('HGB', 12.0))
+        base_assessment = screening_assessment(baseline_hgb)["severity"]
+        simulated_assessment = screening_assessment(s_hgb)["severity"]
+
+        st.subheader("WHO hemoglobin assessment")
+        r1, r2 = st.columns(2)
+        r1.metric("Baseline", base_assessment, f"HGB {baseline_hgb:.1f} g/dL")
+        r2.metric("Simulated", simulated_assessment, f"HGB {s_hgb:.1f} g/dL")
+
         if tab_ok:
             try:
-                base_prob = float(tab_model.predict_proba(scale_patient(base_df))[0, 1])
-                sim_prob  = float(tab_model.predict_proba(scale_patient(sim_df))[0, 1])
-            except Exception:
-                base_prob = 0.85 if curr.get('HGB',12.) < 11 else 0.08
-                sim_prob  = 0.85 if s_hgb < 11 else 0.08
+                base_prob = positive_class_probability(tab_model, scale_patient(base_df))
+                sim_prob = positive_class_probability(tab_model, scale_patient(sim_df))
+                diff = (sim_prob - base_prob) * 100
+                arrow = "↑" if diff > 0.5 else ("↓" if diff < -0.5 else "—")
+                st.subheader("CBC model scores")
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Baseline anemia score", f"{base_prob:.1%}")
+                c2.metric("Simulated anemia score", f"{sim_prob:.1%}")
+                c3.metric("Score change", f"{diff:+.1f} percentage points", arrow)
+            except Exception as exc:
+                st.error(f"CBC model simulation failed: {exc}")
         else:
-            base_prob = 0.85 if curr.get('HGB',12.) < 11 else 0.08
-            sim_prob  = 0.85 if s_hgb < 11 else 0.08
-
-        stored_img_prob = st.session_state.get('prediction_results', {}).get('img_prob')
-        if stored_img_prob is not None:
-            base_fused = 0.60 * base_prob + 0.40 * stored_img_prob
-            sim_fused  = 0.60 * sim_prob  + 0.40 * stored_img_prob
-        else:
-            base_fused, sim_fused = base_prob, sim_prob
-
-        diff  = (sim_fused - base_fused) * 100
-        arrow = "↑" if diff > 0.5 else ("↓" if diff < -0.5 else "—")
-        clr   = "#e74c3c" if diff > 0 else ("#2ecc71" if diff < 0 else "#7f8c8d")
-
-        r1, r2, r3 = st.columns(3)
-        with r1:
-            st.markdown(f"""<div class="sim-card"><h4>Baseline Risk</h4>
-            <div style="font-size:2rem;font-weight:800;color:#1f77b4">{base_fused:.1%}</div>
-            <div>{'Anemic' if base_fused>=0.5 else 'Non-Anemic'}</div></div>""", unsafe_allow_html=True)
-        with r2:
-            sc = "#e74c3c" if sim_fused>=0.5 else "#2ecc71"
-            st.markdown(f"""<div class="sim-card"><h4>Simulated Risk</h4>
-            <div style="font-size:2rem;font-weight:800;color:{sc}">{sim_fused:.1%}</div>
-            <div>{'Anemic' if sim_fused>=0.5 else 'Non-Anemic'}</div></div>""", unsafe_allow_html=True)
-        with r3:
-            st.markdown(f"""<div class="sim-card"><h4>Risk Change</h4>
-            <div style="font-size:2rem;font-weight:800;color:{clr}">{arrow} {abs(diff):.1f}%</div>
-            <div>{'Increased' if diff>0 else ('Decreased' if diff<0 else 'No change')}</div></div>""",
-            unsafe_allow_html=True)
-
-        # Show WHO interpretation
-        st.write("")
-        who_sev = "Severe" if s_hgb < 7 else ("Moderate" if s_hgb < 10 else ("Mild" if s_hgb < 11 else "Normal"))
-        st.caption(f"Simulated HGB = {s_hgb:.1f} g/dL → WHO Category: **{who_sev}**")
+            st.info("CBC model scores are unavailable; no model probability is estimated.")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # TAB 4 — VALIDATION DASHBOARD
@@ -991,66 +935,40 @@ with tabs[3]:
         except Exception as e:
             st.error(f"Could not load metrics.json: {e}")
 
-    # Keys in metrics.json from train.py: image_model, tabular_model, fusion_model
-    img_m = metrics_data.get('image_model',   {'accuracy':0.9482,'f1':0.9482,'auc':0.9886})
-    tab_m = metrics_data.get('tabular_model', {'accuracy':0.9994,'f1':0.9994,'auc':0.9999})
-    fus_m = metrics_data.get('fusion_model',  {'accuracy':0.9390,'f1':0.9390,'auc':None})
+    # The saved tabular/fusion scores refer to the older 17-feature experiment.
+    # That experiment includes HGB, which also defines its target label.
+    img_m = metrics_data.get('image_model')
 
     m1, m2, m3 = st.columns(3)
     with m1:
         st.markdown('<div class="sim-card"><h3>👁️ Image (ResNet-18)</h3><p>Eye & Nail Images</p></div>', unsafe_allow_html=True)
-        st.metric("Accuracy", f"{img_m.get('accuracy',0):.2%}")
-        auc_val = img_m.get('auc', img_m.get('auc_roc', 0))
-        st.metric("AUC-ROC",  f"{auc_val:.4f}" if auc_val else "N/A")
-        st.metric("F1 Score", f"{img_m.get('f1',0):.4f}")
+        if img_m:
+            st.metric("Accuracy", f"{img_m['accuracy']:.2%}" if img_m.get('accuracy') is not None else "N/A")
+            auc_val = img_m.get('auc', img_m.get('auc_roc'))
+            st.metric("AUC-ROC", f"{auc_val:.4f}" if auc_val is not None else "N/A")
+            st.metric("F1 Score", f"{img_m['f1']:.4f}" if img_m.get('f1') is not None else "N/A")
+            st.caption("Saved held-out image validation metrics; not a patient-specific confidence guarantee.")
+        else:
+            st.info("No image validation metrics are available.")
     with m2:
-        st.markdown('<div class="sim-card"><h3>🩸 Tabular (XGBoost)</h3><p>17 Clinical Features</p></div>', unsafe_allow_html=True)
-        st.metric("Accuracy", f"{tab_m.get('accuracy',0):.2%}")
-        auc_val2 = tab_m.get('auc', tab_m.get('auc_roc', 0))
-        st.metric("AUC-ROC",  f"{auc_val2:.4f}" if auc_val2 else "N/A")
-        st.metric("F1 Score", f"{tab_m.get('f1',0):.4f}")
+        st.markdown('<div class="sim-card"><h3>🩸 Tabular (XGBoost)</h3><p>10 CBC Features</p></div>', unsafe_allow_html=True)
+        st.metric("Accuracy", "N/A")
+        st.metric("AUC-ROC", "N/A")
+        st.metric("F1 Score", "N/A")
+        st.caption("The committed tabular metrics describe an older 17-feature model, so they are not presented as results for this deployed checkpoint.")
     with m3:
-        st.markdown('<div class="sim-card"><h3>🔗 Fusion Ensemble</h3><p>Multimodal Integration</p></div>', unsafe_allow_html=True)
-        st.metric("Accuracy", f"{fus_m.get('accuracy',0):.2%}")
-        fus_auc = fus_m.get('auc', fus_m.get('auc_roc'))
-        st.metric("AUC-ROC",  f"{fus_auc:.4f}" if fus_auc else "N/A")
-        st.metric("F1 Score", f"{fus_m.get('f1',0):.4f}")
+        st.markdown('<div class="sim-card"><h3>🩺 WHO Assessment</h3><p>HGB threshold rule</p></div>', unsafe_allow_html=True)
+        st.metric("Validation metrics", "N/A")
+        st.caption("The final assessment uses HGB < 11 g/dL; no validated deployed fusion checkpoint is used.")
 
     st.divider()
     st.subheader("Validation Figures")
 
-    # Figure name mapping — handles both local and Colab-generated filenames
-    FIG_NAMES = {
-        "Image Confusion Matrix":    ["img_confusion_matrix.png", "image_confusion_matrix.png"],
-        "Image ROC Curve":           ["roc_curves.png", "image_roc_curve.png"],
-        "Tabular Confusion Matrix":  ["tabular_confusion_matrix.png"],
-        "Tabular ROC Curve":         ["tabular_roc_curve.png"],
-        "Feature Importance":        ["feature_importance.png", "tabular_feature_importance.png"],
-        "Model Comparison":          ["model_comparison.png"],
-        "Architecture Pipeline":     ["architecture_pipeline.png"],
-        "Data Cohort Distribution":  ["data_cohort_distribution.png"],
-    }
+    st.info("Saved charts in this repository include results from earlier model configurations and are not shown as validation for the deployed CBC checkpoint.")
 
-    def show_fig_multi(name_list, caption):
-        search_dirs = [FIGURES_DIR, os.path.join(BASE_DIR,"paper","figures")]
-        for fname in name_list:
-            for folder in search_dirs:
-                p = os.path.join(folder, fname)
-                if os.path.exists(p):
-                    st.image(p, caption=caption, use_container_width=True)
-                    return
-        st.caption(f"_{caption}_ — figure not found")
-
-    fc1, fc2 = st.columns(2, gap="large")
-    items = list(FIG_NAMES.items())
-    for i, (cap, fnames) in enumerate(items):
-        col = fc1 if i % 2 == 0 else fc2
-        with col:
-            show_fig_multi(fnames, cap)
-
-    # Show raw metrics JSON
     if metrics_data:
-        with st.expander("📋 Full Metrics JSON"):
+        with st.expander("📋 Historical training metrics (not deployment validation)"):
+            st.warning("The older tabular experiment includes HGB as both an input and the source of its anemia labels; these results are not independent validation of the deployed CBC model.")
             st.json(metrics_data)
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1061,25 +979,30 @@ with tabs[4]:
     st.markdown("Export a comprehensive diagnostic report for clinical records.")
     st.divider()
 
-    patient_inputs = st.session_state.get('patient_inputs', PRESETS["Normal (Healthy Pregnant)"])
     pred_res = st.session_state.get('prediction_results', {
-        'tab_prob':None,'tab_label':'N/A','img_prob':None,'img_label':'N/A',
-        'fusion_prob':None,'fusion_label':'N/A','agreement_pct':None,
-        'models_agree':True,'severity':'N/A'
+        'tab_prob':None,'tab_model_label':'N/A','img_prob':None,'img_label':'N/A',
+        'assessment_label':'N/A','agreement_pct':None,
+        'models_agree':None,'severity':'N/A'
     })
+    patient_inputs = pred_res.get(
+        'patient_inputs',
+        st.session_state.get('patient_inputs', PRESETS["Normal (Healthy Pregnant)"]),
+    )
 
     # Show summary before download
     pc1, pc2 = st.columns(2)
     with pc1:
         st.markdown("**Patient Summary**")
-        fl = pred_res.get('fusion_label','N/A')
-        fp = pred_res.get('final_prob', pred_res.get('fusion_prob'))
+        fl = pred_res.get('assessment_label','N/A')
+        fp = pred_res.get('tab_prob')
         sev_str = pred_res.get('severity','N/A')
         hgb_val = patient_inputs.get('HGB', 12.)
         st.write(f"- Status: **{fl}**")
-        st.write(f"- Risk Score: **{fp:.1%}**" if fp is not None else "- Risk Score: **N/A** (run prediction first)")
+        st.write(f"- CBC model anemia score: **{fp:.1%}**" if fp is not None else "- CBC model score: **N/A**")
         st.write(f"- Severity: **{sev_str}**")
         st.write(f"- HGB: **{hgb_val:.1f} g/dL**")
+        if pred_res.get('patient_inputs') is not None:
+            st.caption("Report inputs are the snapshot used for the last prediction.")
         if fl == 'N/A':
             st.info("ℹ️ Run a prediction in Tab 1 first for full report.")
 
@@ -1106,36 +1029,46 @@ with tabs[4]:
             story = []
             story.append(Paragraph("PRENATAL ANEMIA SCREENING REPORT", h1))
             story.append(Paragraph(
-                f"AI-Assisted Multimodal Diagnostic Assessment · Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}",
+                f"AI-assisted screening support · Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}",
                 T('sub', fontSize=8, textColor=colors.HexColor('#666'), spaceAfter=8)))
             story.append(HRFlowable(width="100%", thickness=1.5,
                                     color=colors.HexColor('#1f77b4'), spaceAfter=10))
 
             # Diagnosis status
-            is_anemic = pred_res.get('fusion_label') == 'Anemic'
-            bg   = colors.HexColor('#fee2e2') if is_anemic else colors.HexColor('#dcfce7')
-            bd_c = colors.HexColor('#ef4444') if is_anemic else colors.HexColor('#22c55e')
-            _fp  = pred_res.get('final_prob', pred_res.get('fusion_prob', 0)) or 0
-            txt  = (f"<b>STATUS: {pred_res.get('fusion_label','N/A').upper()}</b> · "
-                    f"Risk: {_fp:.1%} · "
-                    f"Severity: {pred_res.get('severity','N/A')}")
+            who_label = pred_res.get('assessment_label', 'N/A')
+            is_anemic = who_label == 'Anemic'
+            bg = (
+                colors.HexColor('#fee2e2') if is_anemic
+                else colors.HexColor('#dcfce7') if who_label == 'Non-Anemic'
+                else colors.HexColor('#f1f5f9')
+            )
+            bd_c = (
+                colors.HexColor('#ef4444') if is_anemic
+                else colors.HexColor('#22c55e') if who_label == 'Non-Anemic'
+                else colors.HexColor('#94a3b8')
+            )
+            txt = (
+                f"<b>WHO HGB ASSESSMENT: {who_label.upper()}</b> · "
+                f"HGB: {patient_inputs.get('HGB', 12.):.1f} g/dL · "
+                f"Severity: {pred_res.get('severity','N/A')}"
+            )
             t = Table([[Paragraph(txt, bd)]], colWidths=[540])
             t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,-1),bg),
                                    ('BOX',(0,0),(-1,-1),1.5,bd_c),
                                    ('PADDING',(0,0),(-1,-1),8)]))
             story.append(t); story.append(Spacer(1,10))
 
-            # Confidence table
-            story.append(Paragraph("Model Confidence Scores", h2))
+            # Model outputs are kept separate; no unvalidated fusion score is reported.
+            story.append(Paragraph("Model Outputs (not a diagnosis)", h2))
             _ip = pred_res.get('img_prob')
-            _tp = pred_res.get('tab_prob', 0) or 0
-            _fp2= pred_res.get('final_prob', pred_res.get('fusion_prob', 0)) or 0
+            _tp = pred_res.get('tab_prob')
             img_str = f"{_ip:.1%}" if _ip is not None else "N/A"
+            tab_str = f"{_tp:.1%}" if _tp is not None else "N/A"
             rows = [
-                ["Model","Architecture","Anemia Prob","Prediction"],
-                ["Visual","ResNet-18 ImageNet", img_str, pred_res.get('img_label','N/A')],
-                ["Clinical","XGBoost 300 trees", f"{_tp:.1%}", pred_res.get('tab_label','N/A')],
-                ["Fusion","Weighted Ensemble",  f"{_fp2:.1%}", pred_res.get('fusion_label','N/A')],
+                ["Assessment / model","Basis","Anemia score","Output"],
+                ["WHO assessment","HGB < 11 g/dL", "N/A", who_label],
+                ["CBC model","XGBoost · 10 CBC features", tab_str, pred_res.get('tab_model_label','N/A')],
+                ["Image model (adjunct)","ResNet-18", img_str, pred_res.get('img_label','N/A')],
             ]
             ct = Table(rows, colWidths=[130,175,110,125])
             ct.setStyle(TableStyle([
@@ -1172,16 +1105,20 @@ with tabs[4]:
             story.append(pt); story.append(Spacer(1,10))
 
             # SHAP top features
-            story.append(Paragraph("Top Clinical Drivers (SHAP)", h2))
+            story.append(Paragraph("CBC Feature Attributions (SHAP)", h2))
             p_df_shap = pd.DataFrame([patient_inputs])[FEATURES]
             shap_rows = [["Feature","Value","SHAP","Direction"]]
             try:
-                td, _ = run_shap(tab_model if tab_ok else None, scale_patient(p_df_shap) if tab_ok else p_df_shap)
+                td, _ = run_shap(
+                    tab_model if tab_ok else None,
+                    scale_patient(p_df_shap) if tab_ok else p_df_shap,
+                    display_patient_df=p_df_shap,
+                )
                 for _, r in td.head(6).iterrows():
                     shap_rows.append([r['Feature'], f"{r['Patient Value']:.2f}",
                                       f"{r['SHAP Value']:+.3f}", r['Direction']])
             except Exception:
-                shap_rows.append(["HGB", f"{patient_inputs.get('HGB',12.):.2f}", "N/A", "N/A"])
+                shap_rows.append(["Attributions unavailable", "", "N/A", ""])
 
             st2 = Table(shap_rows, colWidths=[120,100,100,220])
             st2.setStyle(TableStyle([
@@ -1196,7 +1133,7 @@ with tabs[4]:
             story.append(st2); story.append(Spacer(1,12))
 
             story.append(Paragraph(
-                "<b>Disclaimer:</b> This report is for research/decision-support only, not a clinical diagnosis. "
+                "<b>Disclaimer:</b> This screening report is for research/decision-support only, not a clinical diagnosis. "
                 "Confirm all findings with a licensed healthcare provider.",
                 T('disc', fontSize=7, textColor=colors.HexColor('#64748b'))))
 
