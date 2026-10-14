@@ -33,6 +33,7 @@ class InferenceTests(unittest.TestCase):
     def test_who_anemia_cutoff(self):
         self.assertEqual(who_anemia_label(10.99), "Anemic")
         self.assertEqual(who_anemia_label(11.0), "Non-Anemic")
+        self.assertIsNone(who_anemia_label(None))
 
     def test_who_severity_boundaries(self):
         cases = [
@@ -46,6 +47,7 @@ class InferenceTests(unittest.TestCase):
         for hemoglobin, expected in cases:
             with self.subTest(hemoglobin=hemoglobin):
                 self.assertEqual(who_severity(hemoglobin), expected)
+        self.assertIsNone(who_severity(None))
 
     def test_agreement_requires_both_model_scores(self):
         self.assertIsNone(modality_agreement(0.6, None))
@@ -56,6 +58,12 @@ class InferenceTests(unittest.TestCase):
         self.assertEqual(result["label"], "Anemic")
         self.assertEqual(result["severity"], "Severe Anemia")
         self.assertAlmostEqual(result["modality_agreement"], 2.0)
+
+    def test_missing_hgb_does_not_assume_a_normal_patient(self):
+        result = screening_assessment(None, image_probability=0.99)
+        self.assertIsNone(result["label"])
+        self.assertIsNone(result["severity"])
+        self.assertIsNone(result["modality_agreement"])
 
 
 if __name__ == "__main__":

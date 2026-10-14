@@ -22,11 +22,15 @@ def positive_class_probability(model, features):
 
 def who_anemia_label(hemoglobin):
     """WHO pregnancy screening threshold used to label the training data."""
+    if hemoglobin is None or not np.isfinite(hemoglobin):
+        return None
     return "Anemic" if hemoglobin < 11.0 else "Non-Anemic"
 
 
 def who_severity(hemoglobin):
     """Return the WHO hemoglobin severity band used by the app."""
+    if hemoglobin is None or not np.isfinite(hemoglobin):
+        return None
     if hemoglobin < 7.0:
         return "Severe Anemia"
     if hemoglobin < 10.0:

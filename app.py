@@ -371,7 +371,7 @@ st.markdown("""
 
 # ═══════════════════════════ SESSION STATE ════════════════════════════════════
 if 'patient_inputs' not in st.session_state:
-    st.session_state['patient_inputs'] = PRESETS["Normal (Healthy Pregnant)"].copy()
+    st.session_state['patient_inputs'] = {}
 if 'current_image' not in st.session_state:
     st.session_state['current_image'] = None
 if 'prediction_results' not in st.session_state:
@@ -419,12 +419,16 @@ with tabs[0]:
 
     with col_L:
         st.subheader("1️⃣ Clinical & Hematological Parameters")
-        st.caption("The deployed XGBoost model uses the 10 CBC values only. Maternal vitals below are recorded for context; the WHO screening category is determined by HGB.")
+        st.caption("Enter the values from your blood test below, or choose an example preset. Empty fields are not treated as normal. The CBC model needs all 10 CBC values; the WHO screening category needs HGB.")
 
-        # ── Preset selector ──────────────────────────────────────────────────
+        # ── Manual input / optional preset ──────────────────────────────────
         pc1, pc2 = st.columns([2, 1])
         with pc1:
-            sel_preset = st.selectbox("Load Clinical Preset:", list(PRESETS.keys()), key="preset_sel")
+            sel_preset = st.selectbox(
+                "Input option:",
+                ["Enter my own values"] + list(PRESETS.keys()),
+                key="preset_sel",
+            )
         # Map feature names → widget key names (no spaces in Streamlit keys)
         FEAT_KEY_MAP = {
             'Age':'inp_Age','BMI':'inp_BMI','BS':'inp_BS',
@@ -435,47 +439,65 @@ with tabs[0]:
             'RDW':'inp_RDW','Systolic BP':'inp_SystolicBP','WBC':'inp_WBC'
         }
         with pc2:
-            st.write("")
-            st.write("")
-            if st.button("✅ Apply Preset", use_container_width=True):
+            if st.button(
+                "✅ Load Preset",
+                use_container_width=True,
+                disabled=sel_preset == "Enter my own values",
+            ):
                 vals = PRESETS[sel_preset]
                 st.session_state['patient_inputs'] = vals.copy()
                 for feat, val in vals.items():
                     key = FEAT_KEY_MAP.get(feat, f"inp_{feat}")
                     st.session_state[key] = float(val)
                 st.rerun()
+            if st.button("🧹 Clear Values", use_container_width=True):
+                st.session_state['patient_inputs'] = {}
+                for key in FEAT_KEY_MAP.values():
+                    st.session_state[key] = None
+                st.rerun()
 
         cur = st.session_state['patient_inputs']
+        def number_input(label, feature, min_value, max_value, step, key, help_text=None):
+            return st.number_input(
+                label,
+                min_value=min_value,
+                max_value=max_value,
+                value=cur.get(feature),
+                step=step,
+                key=key,
+                placeholder="Enter value",
+                help=help_text,
+            )
 
         # ── CBC inputs with explicit keys ────────────────────────────────────
         st.markdown("**Complete Blood Count (CBC)**")
         c1, c2, c3 = st.columns(3)
         with c1:
-            hgb  = st.number_input("HGB (g/dL)",   3.0,  20.0, float(cur.get('HGB', 12.8)),  0.1, key="inp_HGB",
-                                   help="<11 g/dL = maternal anemia (WHO)")
-            rbc  = st.number_input("RBC (10¹²/L)", 1.0,   8.0, float(cur.get('RBC', 4.6)),   0.1, key="inp_RBC")
-            hct  = st.number_input("HCT (%)",      10.0,  60.0, float(cur.get('HCT', 37.5)),  0.5, key="inp_HCT")
+            hgb = number_input("HGB (g/dL)", "HGB", 3.0, 20.0, 0.1, "inp_HGB",
+                               help_text="<11 g/dL = maternal anemia (WHO)")
+            rbc = number_input("RBC (10¹²/L)", "RBC", 1.0, 8.0, 0.1, "inp_RBC")
+            hct = number_input("HCT (%)", "HCT", 10.0, 60.0, 0.5, "inp_HCT")
         with c2:
-            mcv  = st.number_input("MCV (fL)",     40.0, 130.0, float(cur.get('MCV', 89.0)),  0.5, key="inp_MCV")
-            mch  = st.number_input("MCH (pg)",     15.0,  45.0, float(cur.get('MCH', 30.5)),  0.5, key="inp_MCH")
-            mchc = st.number_input("MCHC (g/dL)",  20.0,  45.0, float(cur.get('MCHC', 34.0)), 0.5, key="inp_MCHC")
+            mcv = number_input("MCV (fL)", "MCV", 40.0, 130.0, 0.5, "inp_MCV")
+            mch = number_input("MCH (pg)", "MCH", 15.0, 45.0, 0.5, "inp_MCH")
+            mchc = number_input("MCHC (g/dL)", "MCHC", 20.0, 45.0, 0.5, "inp_MCHC")
         with c3:
-            rdw  = st.number_input("RDW (%)",       8.0,  30.0, float(cur.get('RDW', 12.8)),  0.1, key="inp_RDW")
-            wbc  = st.number_input("WBC (10⁹/L)",  2.0,  30.0, float(cur.get('WBC', 7.8)),   0.1, key="inp_WBC")
-            plt_ = st.number_input("PLT (10⁹/L)", 50.0, 800.0, float(cur.get('PLT', 260.0)), 5.0, key="inp_PLT")
+            rdw = number_input("RDW (%)", "RDW", 8.0, 30.0, 0.1, "inp_RDW")
+            wbc = number_input("WBC (10⁹/L)", "WBC", 2.0, 30.0, 0.1, "inp_WBC")
+            plt_ = number_input("PLT (10⁹/L)", "PLT", 50.0, 800.0, 5.0, "inp_PLT")
 
         with st.expander("⚙️ Maternal Vitals & Biomarkers", expanded=True):
             v1, v2 = st.columns(2)
             with v1:
-                age  = st.number_input("Age (yrs)",           14.0, 55.0, float(cur.get('Age', 26.)),    1.0, key="inp_Age")
-                bmi  = st.number_input("BMI (kg/m²)",         12.0, 50.0, float(cur.get('BMI', 23.5)),   0.5, key="inp_BMI")
-                bs   = st.number_input("Blood Sugar (mmol/L)", 2.0, 25.0, float(cur.get('BS', 4.8)),     0.1, key="inp_BS")
-                temp = st.number_input("Body Temp (°F)",       95.0,105.0,float(cur.get('Body Temp',98.4)),0.2,key="inp_BodyTemp")
+                age = number_input("Age (yrs)", "Age", 14.0, 55.0, 1.0, "inp_Age")
+                bmi = number_input("BMI (kg/m²)", "BMI", 12.0, 50.0, 0.5, "inp_BMI")
+                bs = number_input("Blood Sugar (mmol/L)", "BS", 2.0, 25.0, 0.1, "inp_BS")
+                temp = number_input("Body Temp (°F)", "Body Temp", 95.0, 105.0, 0.2, "inp_BodyTemp")
             with v2:
-                sbp  = st.number_input("Systolic BP",          60.0,220.0,float(cur.get('Systolic BP',110.)),1.0,key="inp_SystolicBP")
-                dbp  = st.number_input("Diastolic BP",         40.0,140.0,float(cur.get('Diastolic',70.)),  1.0,key="inp_Diastolic")
-                hr   = st.number_input("Heart Rate (bpm)",     40.0,160.0,float(cur.get('Heart Rate',74.)), 1.0,key="inp_HeartRate")
-                mpv  = st.number_input("MPV (fL)",              5.0, 20.0,float(cur.get('MPV', 8.2)),    0.2, key="inp_MPV")
+                sbp = number_input("Systolic BP", "Systolic BP", 60.0, 220.0, 1.0, "inp_SystolicBP")
+                dbp = number_input("Diastolic BP", "Diastolic", 40.0, 140.0, 1.0, "inp_Diastolic")
+                hr = number_input("Heart Rate (bpm)", "Heart Rate", 40.0, 160.0, 1.0, "inp_HeartRate")
+                mpv = number_input("MPV (fL)", "MPV", 5.0, 20.0, 0.2, "inp_MPV")
 
         # Build patient dict from current widget values
         patient_dict = {
@@ -486,6 +508,7 @@ with tabs[0]:
         }
         st.session_state['patient_inputs'] = patient_dict
         patient_df = pd.DataFrame([patient_dict])[FEATURES]
+        missing_cbc = [feature for feature in CBC_FEATURES if patient_dict[feature] is None]
 
     with col_R:
         st.subheader("2️⃣ Visual Biometric (Eye / Nail)")
@@ -560,13 +583,15 @@ with tabs[0]:
         model_error = None
 
         # ── CBC / Tabular prediction ─────────────────────────────────────────
-        if tab_ok:
+        if tab_ok and not missing_cbc:
             try:
                 tab_prob = positive_class_probability(tab_model, scale_patient(patient_df))
                 tab_model_label = "Anemic" if tab_prob >= 0.5 else "Non-Anemic"
             except Exception as e:
                 st.error(f"CBC model error: {e}")
                 model_error = str(e)
+        elif tab_ok:
+            model_error = "Enter all 10 CBC values to calculate the CBC model score."
         # ── Image prediction ─────────────────────────────────────────────────
         if has_image:
             img_prob, img_label = predict_image(pil_img)
@@ -585,7 +610,7 @@ with tabs[0]:
 
         # Severity is determined directly from HGB, including the normal range.
         sev = assessment["severity"]
-        sev_cls = (
+        sev_cls = "sev-normal" if sev is None else (
             "sev-severe" if sev == "Severe Anemia"
             else "sev-moderate" if sev == "Moderate Anemia"
             else "sev-mild" if sev == "Mild Anemia"
@@ -609,13 +634,13 @@ with tabs[0]:
 
         # ── Results panel ────────────────────────────────────────────────────
         st.write("")
-        if tab_prob is not None and tab_model_label != final_label:
+        if tab_prob is not None and final_label is not None and tab_model_label != final_label:
             st.warning(
                 f"CBC model classification ({tab_model_label}) differs from the "
                 f"WHO HGB assessment ({final_label}); the final category follows HGB."
             )
 
-        if tab_prob is not None and img_prob is not None:
+        if tab_prob is not None and img_prob is not None and final_label is not None:
             rc1, rc2, rc3 = st.columns(3)
             with rc1:
                 color = "#e74c3c" if tab_model_label == "Anemic" else "#22c55e"
@@ -656,34 +681,37 @@ with tabs[0]:
                 st.metric("CBC model anemia score", f"{tab_prob:.1%}",
                           help=f"Model classification: {tab_model_label}")
             else:
-                st.info("CBC model score unavailable. The assessment below uses the WHO HGB threshold only.")
+                st.info(model_error or "CBC model score unavailable.")
             if img_prob is not None:
                 color = "#e74c3c" if img_label == "Anemic" else "#22c55e"
                 st.markdown(f"""<div class="sim-card">
                 <h4>🖼️ Image Model (adjunct)</h4>
                 <div style="font-size:2rem;font-weight:800;color:{color}">{img_prob:.1%}</div>
-                <div><b>{img_label}</b></div></div>""", unsafe_allow_html=True)
-            color = "#e74c3c" if final_label == "Anemic" else "#22c55e"
-            st.markdown(f"""<div class="sim-card">
-            <h4>🩺 WHO HGB Assessment</h4>
-            <div style="font-size:1.5rem;font-weight:800;color:{color}">{final_label}</div>
-            <div><b>{sev}</b></div></div>""", unsafe_allow_html=True)
-            if model_error:
-                st.warning(f"CBC model is unavailable for this prediction: {model_error}")
+                <div><b>Image model says: {img_label}</b></div></div>""", unsafe_allow_html=True)
+            if final_label is not None:
+                color = "#e74c3c" if final_label == "Anemic" else "#22c55e"
+                st.markdown(f"""<div class="sim-card">
+                <h4>🩺 WHO HGB Assessment</h4>
+                <div style="font-size:1.5rem;font-weight:800;color:{color}">{final_label}</div>
+                <div><b>{sev}</b></div></div>""", unsafe_allow_html=True)
+            else:
+                st.info("Enter your HGB blood-test result to calculate the WHO anemia assessment. The image score alone cannot confirm or rule out anemia.")
 
         # ── Severity badge ───────────────────────────────────────────────────
         st.write("")
-        st.markdown(f'<span class="{sev_cls}">📊 Severity: {sev}</span>', unsafe_allow_html=True)
+        if sev is not None:
+            st.markdown(f'<span class="{sev_cls}">📊 Severity: {sev}</span>', unsafe_allow_html=True)
         st.write("")
 
-        if "Severe" in sev:
-            st.error("🚨 URGENT: HGB < 7.0 g/dL — seek urgent obstetric/medical assessment. A clinician should determine treatment.")
-        elif "Moderate" in sev:
-            st.warning("⚠️ HIGH PRIORITY: HGB 7.0–9.9 g/dL — contact your obstetric clinician promptly for assessment and treatment planning.")
-        elif "Mild" in sev:
-            st.info("📋 FOLLOW UP: HGB 10.0–10.9 g/dL — review the result with your obstetric clinician and discuss appropriate follow-up.")
-        else:
-            st.success("✅ HEALTHY: HGB ≥ 11.0 g/dL — maintain routine antenatal care and nutrition.")
+        if sev is not None:
+            if "Severe" in sev:
+                st.error("🚨 URGENT: HGB < 7.0 g/dL — seek urgent obstetric/medical assessment. A clinician should determine treatment.")
+            elif "Moderate" in sev:
+                st.warning("⚠️ HIGH PRIORITY: HGB 7.0–9.9 g/dL — contact your obstetric clinician promptly for assessment and treatment planning.")
+            elif "Mild" in sev:
+                st.info("📋 FOLLOW UP: HGB 10.0–10.9 g/dL — review the result with your obstetric clinician and discuss appropriate follow-up.")
+            else:
+                st.success("✅ HEALTHY: HGB ≥ 11.0 g/dL — maintain routine antenatal care and nutrition.")
 
         with st.expander("🔬 Raw model scores"):
             if tab_prob is not None:
@@ -692,7 +720,8 @@ with tabs[0]:
                 st.write(f"**Image model:** Anemic={img_prob:.4f}  Non-Anemic={1-img_prob:.4f}")
             if tab_prob is not None:
                 st.write(f"**CBC model classification:** {tab_model_label}")
-            st.write(f"**HGB (WHO rule):** {hgb:.1f} g/dL → {'Anemic' if hgb < 11 else 'Normal'}")
+            if hgb is not None:
+                st.write(f"**HGB (WHO rule):** {hgb:.1f} g/dL → {'Anemic' if hgb < 11 else 'Normal'}")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # TAB 2 — EXPLAINABILITY
@@ -781,8 +810,10 @@ with tabs[1]:
     with col_sh:
         st.subheader("📊 Clinical Feature Attribution")
 
-        cur_inputs = st.session_state.get('patient_inputs', PRESETS["Normal (Healthy Pregnant)"])
+        cur_inputs = st.session_state.get('patient_inputs', {})
+        cur_inputs = {feature: cur_inputs.get(feature) for feature in FEATURES}
         p_df = pd.DataFrame([cur_inputs])[FEATURES]
+        has_complete_cbc = all(cur_inputs[feature] is not None for feature in CBC_FEATURES)
 
         if not tab_ok:
             st.info("ℹ️ CBC model not loaded — model-based attributions are unavailable.")
@@ -795,7 +826,7 @@ with tabs[1]:
             st.dataframe(p_df.T.rename(columns={0: "Value"}), use_container_width=True)
 
         if st.button("📊 Compute SHAP Explanation", type="primary", key="btn_shap",
-                     disabled=not (tab_ok and SHAP_AVAILABLE)):
+                     disabled=not (tab_ok and SHAP_AVAILABLE and has_complete_cbc)):
             with st.spinner("Computing SHAP values…"):
                 try:
                     top_df, shap_fig = run_shap(
@@ -859,9 +890,12 @@ with tabs[1]:
 with tabs[2]:
     st.header("📊 What-If Clinical Simulator")
     st.info("⚠️ **Model simulation only — not a clinical diagnosis.**")
+    st.caption("If you have not entered patient values, the simulator starts from the healthy example preset. These defaults are only for the simulation; they are not used as screening results.")
     st.divider()
 
-    curr = st.session_state.get('patient_inputs', PRESETS["Normal (Healthy Pregnant)"])
+    entered_values = st.session_state.get('patient_inputs', {})
+    curr = PRESETS["Normal (Healthy Pregnant)"].copy()
+    curr.update({key: value for key, value in entered_values.items() if value is not None})
 
     s1, s2, s3 = st.columns(3, gap="medium")
     with s1:
@@ -986,7 +1020,7 @@ with tabs[4]:
     })
     patient_inputs = pred_res.get(
         'patient_inputs',
-        st.session_state.get('patient_inputs', PRESETS["Normal (Healthy Pregnant)"]),
+        st.session_state.get('patient_inputs', {}),
     )
 
     # Show summary before download
@@ -996,11 +1030,11 @@ with tabs[4]:
         fl = pred_res.get('assessment_label','N/A')
         fp = pred_res.get('tab_prob')
         sev_str = pred_res.get('severity','N/A')
-        hgb_val = patient_inputs.get('HGB', 12.)
+        hgb_val = patient_inputs.get('HGB')
         st.write(f"- Status: **{fl}**")
         st.write(f"- CBC model anemia score: **{fp:.1%}**" if fp is not None else "- CBC model score: **N/A**")
         st.write(f"- Severity: **{sev_str}**")
-        st.write(f"- HGB: **{hgb_val:.1f} g/dL**")
+        st.write(f"- HGB: **{hgb_val:.1f} g/dL**" if hgb_val is not None else "- HGB: **Not entered**")
         if pred_res.get('patient_inputs') is not None:
             st.caption("Report inputs are the snapshot used for the last prediction.")
         if fl == 'N/A':
@@ -1037,6 +1071,8 @@ with tabs[4]:
             # Diagnosis status
             who_label = pred_res.get('assessment_label', 'N/A')
             is_anemic = who_label == 'Anemic'
+            report_hgb = patient_inputs.get('HGB')
+            report_hgb_text = f"{report_hgb:.1f} g/dL" if report_hgb is not None else "Not entered"
             bg = (
                 colors.HexColor('#fee2e2') if is_anemic
                 else colors.HexColor('#dcfce7') if who_label == 'Non-Anemic'
@@ -1049,7 +1085,7 @@ with tabs[4]:
             )
             txt = (
                 f"<b>WHO HGB ASSESSMENT: {who_label.upper()}</b> · "
-                f"HGB: {patient_inputs.get('HGB', 12.):.1f} g/dL · "
+                f"HGB: {report_hgb_text} · "
                 f"Severity: {pred_res.get('severity','N/A')}"
             )
             t = Table([[Paragraph(txt, bd)]], colWidths=[540])
@@ -1108,17 +1144,20 @@ with tabs[4]:
             story.append(Paragraph("CBC Feature Attributions (SHAP)", h2))
             p_df_shap = pd.DataFrame([patient_inputs])[FEATURES]
             shap_rows = [["Feature","Value","SHAP","Direction"]]
-            try:
-                td, _ = run_shap(
-                    tab_model if tab_ok else None,
-                    scale_patient(p_df_shap) if tab_ok else p_df_shap,
-                    display_patient_df=p_df_shap,
-                )
-                for _, r in td.head(6).iterrows():
-                    shap_rows.append([r['Feature'], f"{r['Patient Value']:.2f}",
-                                      f"{r['SHAP Value']:+.3f}", r['Direction']])
-            except Exception:
-                shap_rows.append(["Attributions unavailable", "", "N/A", ""])
+            if not all(patient_inputs.get(feature) is not None for feature in CBC_FEATURES):
+                shap_rows.append(["Enter all CBC values to calculate SHAP", "", "N/A", ""])
+            else:
+                try:
+                    td, _ = run_shap(
+                        tab_model if tab_ok else None,
+                        scale_patient(p_df_shap) if tab_ok else p_df_shap,
+                        display_patient_df=p_df_shap,
+                    )
+                    for _, r in td.head(6).iterrows():
+                        shap_rows.append([r['Feature'], f"{r['Patient Value']:.2f}",
+                                          f"{r['SHAP Value']:+.3f}", r['Direction']])
+                except Exception:
+                    shap_rows.append(["Attributions unavailable", "", "N/A", ""])
 
             st2 = Table(shap_rows, colWidths=[120,100,100,220])
             st2.setStyle(TableStyle([
