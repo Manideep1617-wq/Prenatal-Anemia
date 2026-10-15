@@ -699,6 +699,12 @@ with tabs[0]:
 
         # ── Severity badge ───────────────────────────────────────────────────
         st.write("")
+        if img_prob is not None:
+            st.warning(
+                "The image result is experimental and may be wrong. The current "
+                "image model has not been independently validated on patient-separated "
+                "images; do not use it to confirm or rule out anemia."
+            )
         if sev is not None:
             st.markdown(f'<span class="{sev_cls}">📊 Severity: {sev}</span>', unsafe_allow_html=True)
         st.write("")
@@ -969,9 +975,18 @@ with tabs[3]:
         except Exception as e:
             st.error(f"Could not load metrics.json: {e}")
 
-    # The saved tabular/fusion scores refer to the older 17-feature experiment.
-    # That experiment includes HGB, which also defines its target label.
-    img_m = metrics_data.get('image_model')
+    image_split = (
+        metrics_data.get('dataset_statistics', {})
+        .get('image', {})
+        .get('validation_split')
+    )
+    has_patient_independent_image_validation = (
+        image_split == 'patient-grouped; exact byte-identical duplicates removed'
+    )
+    img_m = (
+        metrics_data.get('image_model')
+        if has_patient_independent_image_validation else None
+    )
 
     m1, m2, m3 = st.columns(3)
     with m1:
@@ -981,9 +996,9 @@ with tabs[3]:
             auc_val = img_m.get('auc', img_m.get('auc_roc'))
             st.metric("AUC-ROC", f"{auc_val:.4f}" if auc_val is not None else "N/A")
             st.metric("F1 Score", f"{img_m['f1']:.4f}" if img_m.get('f1') is not None else "N/A")
-            st.caption("Saved held-out image validation metrics; not a patient-specific confidence guarantee.")
+            st.caption("Patient-grouped validation metrics; not a patient-specific confidence guarantee.")
         else:
-            st.info("No image validation metrics are available.")
+            st.info("No reliable patient-independent image validation metrics are available.")
     with m2:
         st.markdown('<div class="sim-card"><h3>🩸 Tabular (XGBoost)</h3><p>10 CBC Features</p></div>', unsafe_allow_html=True)
         st.metric("Accuracy", "N/A")
@@ -1002,7 +1017,12 @@ with tabs[3]:
 
     if metrics_data:
         with st.expander("📋 Historical training metrics (not deployment validation)"):
-            st.warning("The older tabular experiment includes HGB as both an input and the source of its anemia labels; these results are not independent validation of the deployed CBC model.")
+            st.warning(
+                "The older tabular experiment includes HGB as both an input and the source "
+                "of its anemia labels. Its image metrics used a random split before exact "
+                "duplicates and patient overlap were removed. Neither set of historical "
+                "scores is independent validation of the deployed models."
+            )
             st.json(metrics_data)
 
 # ═══════════════════════════════════════════════════════════════════════════════
