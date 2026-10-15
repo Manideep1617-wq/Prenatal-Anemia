@@ -606,6 +606,8 @@ def main():
     dataset_stats['image'] = {
         'train_samples': len(train_img_loader.dataset),
         'val_samples':   len(val_img_loader.dataset),
+        'source_data_audit': train_img_loader.dataset.dataset_audit,
+        'validation_split': 'patient-grouped; exact byte-identical duplicates removed',
         'image_size':    '224x224',
         'augmentations': ['RandomHorizontalFlip', 'RandomRotation(10)',
                           'ColorJitter(0.2,0.2)', 'Normalize(ImageNet)'],

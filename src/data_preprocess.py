@@ -9,6 +9,7 @@ from PIL import Image
 import torchvision.transforms as transforms
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
+from src.image_data import remove_exact_duplicate_images, split_patient_groups
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. TABULAR DATA – load and create anemia labels
@@ -93,30 +94,60 @@ class AnemiaImageDataset(Dataset):
     """
     def __init__(self, image_dir, split='train', val_ratio=0.2, seed=42, transform=None):
         self.transform = transform
-        self.image_paths = []
-        self.labels = []
+        all_image_paths = []
+        all_labels = []
 
         for folder in ['Eye_Anemic', 'Eye_Non_Anemic', 'Nail_Anemic', 'Nail_Non_Anemic']:
             folder_path = os.path.join(image_dir, folder)
             if not os.path.isdir(folder_path):
                 continue
             label = 1 if ('Anemic' in folder and 'Non' not in folder) else 0
-            for fn in os.listdir(folder_path):
+            for fn in sorted(os.listdir(folder_path)):
                 if fn.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp')):
-                    self.image_paths.append(os.path.join(folder_path, fn))
-                    self.labels.append(label)
+                    all_image_paths.append(os.path.join(folder_path, fn))
+                    all_labels.append(label)
 
-        if len(self.image_paths) == 0:
+        if len(all_image_paths) == 0:
             raise RuntimeError(f"No images found in {image_dir}")
 
-        # Reproducible train/val split
-        np.random.seed(seed)
-        indices = np.random.permutation(len(self.image_paths))
-        split_idx = int(len(indices) * (1 - val_ratio))
-        selected = indices[:split_idx] if split == 'train' else indices[split_idx:]
+        raw_image_count = len(all_image_paths)
+        self.image_paths, self.labels, duplicate_count = remove_exact_duplicate_images(
+            all_image_paths, all_labels
+        )
+        if len(set(self.labels)) < 2:
+            raise ValueError("Image dataset must contain both anemia classes")
+
+        dimensions = []
+        for path in self.image_paths:
+            try:
+                with Image.open(path) as image:
+                    image.verify()
+                with Image.open(path) as image:
+                    dimensions.append(image.size)
+            except (OSError, ValueError) as exc:
+                raise RuntimeError(f"Invalid training image {path!r}: {exc}") from exc
+
+        self.dataset_audit = {
+            'raw_images': raw_image_count,
+            'unique_images': len(self.image_paths),
+            'exact_duplicates_removed': duplicate_count,
+            'median_width_px': float(np.median([width for width, _ in dimensions])),
+            'median_height_px': float(np.median([height for _, height in dimensions])),
+            'images_with_short_side_below_224px': sum(
+                min(width, height) < 224 for width, height in dimensions
+            ),
+        }
+
+        train_indices, val_indices = split_patient_groups(
+            self.image_paths, self.labels, val_ratio=val_ratio, seed=seed
+        )
+        if split not in ('train', 'val'):
+            raise ValueError("split must be 'train' or 'val'")
+        selected = train_indices if split == 'train' else val_indices
 
         self.image_paths = [self.image_paths[i] for i in selected]
         self.labels = [self.labels[i] for i in selected]
+        self.dataset_audit['split'] = split
         print(f"Image {split} set: {len(self.image_paths):,} images | anemic={sum(self.labels):,}  non-anemic={sum(1 for l in self.labels if l==0):,}")
 
     def __len__(self):
@@ -124,9 +155,12 @@ class AnemiaImageDataset(Dataset):
 
     def __getitem__(self, idx):
         try:
-            img = Image.open(self.image_paths[idx]).convert('RGB')
-        except Exception:
-            img = Image.new('RGB', (224, 224), color=(128, 128, 128))
+            with Image.open(self.image_paths[idx]) as image:
+                img = image.convert('RGB')
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(
+                f"Could not read training image {self.image_paths[idx]!r}: {exc}"
+            ) from exc
         if self.transform:
             img = self.transform(img)
         return img, self.labels[idx]
