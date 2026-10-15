@@ -59,7 +59,7 @@ class TabularModel:
 
 class ImageModel(nn.Module):
     """
-    Fine-tuned ResNet-18 for binary anemia detection from eye/nail images.
+    Fine-tuned ResNet-18 for binary anemia detection from eye images.
     Uses torchvision pretrained ImageNet weights — no internet/HuggingFace required.
     ResNet-18 embed_dim = 512.
     """

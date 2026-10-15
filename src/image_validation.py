@@ -31,6 +31,8 @@ def image_checkpoint_validation_error(checkpoint_path, metrics_path):
     image_stats = dataset_stats.get("image", {})
     if not isinstance(image_stats, dict):
         return "training metrics do not contain image dataset statistics"
+    if image_stats.get("image_site") != "eye":
+        return "training metrics do not confirm eye-only image training"
     if image_stats.get("validation_split") != VALIDATION_SPLIT:
         return "training metrics do not document duplicate-free, patient-grouped validation"
 

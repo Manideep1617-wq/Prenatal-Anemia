@@ -10,6 +10,7 @@ from sklearn.model_selection import GroupShuffleSplit
 
 _PATIENT_ID = re.compile(r"(?:non[-_ ]?anemic|anemic)[-_ ]*(\d+)", re.IGNORECASE)
 _COPY_SUFFIX = re.compile(r"\s*\(\d+\)$")
+IMAGE_FOLDERS = ("Eye_Anemic", "Eye_Non_Anemic")
 
 
 def image_group_id(path, label):

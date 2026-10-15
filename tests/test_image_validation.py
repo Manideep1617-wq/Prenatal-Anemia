@@ -18,7 +18,10 @@ class ImageCheckpointValidationTests(unittest.TestCase):
             checkpoint.write_bytes(b"trained checkpoint")
             metrics.write_text(json.dumps({
                 "dataset_statistics": {
-                    "image": {"validation_split": VALIDATION_SPLIT}
+                    "image": {
+                        "image_site": "eye",
+                        "validation_split": VALIDATION_SPLIT,
+                    }
                 },
                 "image_model_artifact": {
                     "checkpoint_sha256": checkpoint_sha256(checkpoint)
@@ -35,7 +38,9 @@ class ImageCheckpointValidationTests(unittest.TestCase):
             metrics = Path(folder) / "metrics.json"
             checkpoint.write_bytes(b"old checkpoint")
             metrics.write_text(json.dumps({
-                "dataset_statistics": {"image": {"train_samples": 100}}
+                "dataset_statistics": {
+                    "image": {"image_site": "eye", "train_samples": 100}
+                }
             }), encoding="utf-8")
 
             error = image_checkpoint_validation_error(checkpoint, metrics)
@@ -49,7 +54,10 @@ class ImageCheckpointValidationTests(unittest.TestCase):
             checkpoint.write_bytes(b"evaluated checkpoint")
             metrics.write_text(json.dumps({
                 "dataset_statistics": {
-                    "image": {"validation_split": VALIDATION_SPLIT}
+                    "image": {
+                        "image_site": "eye",
+                        "validation_split": VALIDATION_SPLIT,
+                    }
                 },
                 "image_model_artifact": {
                     "checkpoint_sha256": checkpoint_sha256(checkpoint)

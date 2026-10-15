@@ -605,6 +605,7 @@ def main():
     print("\nLoading image datasets …")
     train_img_loader, val_img_loader = get_image_loaders(IMAGE_DIR, BATCH_SIZE)
     dataset_stats['image'] = {
+        'image_site': 'eye',
         'train_samples': len(train_img_loader.dataset),
         'val_samples':   len(val_img_loader.dataset),
         'source_data_audit': train_img_loader.dataset.dataset_audit,

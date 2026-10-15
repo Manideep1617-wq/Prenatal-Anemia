@@ -12,6 +12,7 @@ from src.inference import (
     who_severity,
 )
 from src.image_data import (
+    IMAGE_FOLDERS,
     image_group_id,
     remove_exact_duplicate_images,
     split_patient_groups,
@@ -75,17 +76,17 @@ class InferenceTests(unittest.TestCase):
     def test_repeated_patient_images_stay_in_one_split(self):
         paths = [
             "Eye_Anemic/Anemic-014.png",
-            "Nail_Anemic/Anemic-014 (2).png",
+            "Eye_Anemic/Anemic-014 (2).png",
             "Eye_Anemic/Anemic-015.png",
-            "Nail_Anemic/Anemic-015.png",
+            "Eye_Anemic/Anemic-015 (2).png",
             "Eye_Non_Anemic/Non_Anemic-021.png",
-            "Nail_Non_Anemic/Non_Anemic-021.png",
+            "Eye_Non_Anemic/Non_Anemic-021 (2).png",
             "Eye_Non_Anemic/Non_Anemic-022.png",
-            "Nail_Non_Anemic/Non_Anemic-022.png",
+            "Eye_Non_Anemic/Non_Anemic-022 (2).png",
             "Eye_Anemic/Anemic-023.png",
-            "Nail_Anemic/Anemic-023.png",
+            "Eye_Anemic/Anemic-023 (2).png",
             "Eye_Non_Anemic/Non_Anemic-024.png",
-            "Nail_Non_Anemic/Non_Anemic-024.png",
+            "Eye_Non_Anemic/Non_Anemic-024 (2).png",
         ]
         labels = [1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 0, 0]
         train_indices, val_indices = split_patient_groups(paths, labels, seed=3)
@@ -103,6 +104,9 @@ class InferenceTests(unittest.TestCase):
         anemic = image_group_id("Eye_Anemic/Anemic-014.png", 1)
         non_anemic = image_group_id("Eye_Non_Anemic/Non_Anemic-014.png", 0)
         self.assertNotEqual(anemic, non_anemic)
+
+    def test_training_image_folders_are_eye_only(self):
+        self.assertEqual(IMAGE_FOLDERS, ("Eye_Anemic", "Eye_Non_Anemic"))
 
     def test_byte_identical_images_are_removed(self):
         with TemporaryDirectory() as folder:

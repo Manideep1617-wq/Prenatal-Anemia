@@ -9,7 +9,7 @@ from PIL import Image
 import torchvision.transforms as transforms
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
-from src.image_data import remove_exact_duplicate_images, split_patient_groups
+from src.image_data import IMAGE_FOLDERS, remove_exact_duplicate_images, split_patient_groups
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. TABULAR DATA – load and create anemia labels
@@ -83,13 +83,13 @@ def load_tabular_data(data_dir):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 2. IMAGE DATASET – labeled eye & nail images
+# 2. IMAGE DATASET – labeled eye images
 # ─────────────────────────────────────────────────────────────────────────────
 
 class AnemiaImageDataset(Dataset):
     """
-    Loads images from Dataset_sample/ folders:
-      Eye_Anemic / Eye_Non_Anemic / Nail_Anemic / Nail_Non_Anemic
+    Loads only eye images from Dataset_sample/ folders:
+      Eye_Anemic / Eye_Non_Anemic
     Label: 1 = Anemic, 0 = Non-Anemic
     """
     def __init__(self, image_dir, split='train', val_ratio=0.2, seed=42, transform=None):
@@ -97,7 +97,7 @@ class AnemiaImageDataset(Dataset):
         all_image_paths = []
         all_labels = []
 
-        for folder in ['Eye_Anemic', 'Eye_Non_Anemic', 'Nail_Anemic', 'Nail_Non_Anemic']:
+        for folder in IMAGE_FOLDERS:
             folder_path = os.path.join(image_dir, folder)
             if not os.path.isdir(folder_path):
                 continue
@@ -128,6 +128,7 @@ class AnemiaImageDataset(Dataset):
                 raise RuntimeError(f"Invalid training image {path!r}: {exc}") from exc
 
         self.dataset_audit = {
+            'image_site': 'eye',
             'raw_images': raw_image_count,
             'unique_images': len(self.image_paths),
             'exact_duplicates_removed': duplicate_count,

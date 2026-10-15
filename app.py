@@ -390,7 +390,7 @@ if 'shap_result' not in st.session_state:
 # ═══════════════════════════ SIDEBAR ══════════════════════════════════════════
 with st.sidebar:
     st.markdown("## 🩺 Prenatal Anemia AI")
-    st.markdown("CBC-based screening; image scores require matching patient-independent validation.")
+    st.markdown("CBC screening and optional eye-image score; nail images are not supported.")
     st.divider()
     st.markdown("### 🔍 Model Status")
     st.markdown(f"**Tabular (XGBoost):** {'✅ Loaded' if tab_ok else '❌ Not found'}")
@@ -517,12 +517,12 @@ with tabs[0]:
         missing_cbc = [feature for feature in CBC_FEATURES if patient_dict[feature] is None]
 
     with col_R:
-        st.subheader("2️⃣ Visual Biometric (Eye / Nail)")
-        st.info("📷 **Image model** trained on close-up **palpebral conjunctiva** "
-                "(inner lower eyelid) and **nail bed** photos. Random internet images "
-                "may not match training distribution — CBC is more reliable.")
+        st.subheader("2️⃣ Eye Image")
+        st.info("📷 Upload a close-up photo of the **inner lower eyelid (palpebral conjunctiva)** only. "
+                "Nail images are not supported. Random internet images may not match the "
+                "training conditions — CBC is more reliable.")
 
-        uploaded = st.file_uploader("Upload eye or nail bed image",
+        uploaded = st.file_uploader("Upload an eye conjunctiva image",
                                     type=["jpg","jpeg","png"])
 
         # Sample image picker (local data only)
@@ -530,7 +530,7 @@ with tabs[0]:
         sample_map = {}
         sample_dir = os.path.join(BASE_DIR, "data", "Dataset_sample")
         if os.path.isdir(sample_dir):
-            for sf in ["Eye_Anemic","Eye_Non_Anemic","Nail_Anemic","Nail_Non_Anemic"]:
+            for sf in ["Eye_Anemic","Eye_Non_Anemic"]:
                 sp = os.path.join(sample_dir, sf)
                 if os.path.isdir(sp):
                     imgs = [f for f in os.listdir(sp) if f.lower().endswith(('.jpg','.jpeg','.png'))]
@@ -774,7 +774,7 @@ with tabs[1]:
                 sample_opts2 = ["None"]
                 sample_map2  = {}
                 if os.path.isdir(sample_dir2):
-                    for sf in ["Eye_Anemic","Eye_Non_Anemic","Nail_Anemic","Nail_Non_Anemic"]:
+                    for sf in ["Eye_Anemic","Eye_Non_Anemic"]:
                         sp2 = os.path.join(sample_dir2, sf)
                         if os.path.isdir(sp2):
                             imgs2 = [f for f in os.listdir(sp2)
@@ -1003,7 +1003,7 @@ with tabs[3]:
 
     m1, m2, m3 = st.columns(3)
     with m1:
-        st.markdown('<div class="sim-card"><h3>👁️ Image (ResNet-18)</h3><p>Eye & Nail Images</p></div>', unsafe_allow_html=True)
+        st.markdown('<div class="sim-card"><h3>👁️ Eye Image (ResNet-18)</h3><p>Palpebral conjunctiva only</p></div>', unsafe_allow_html=True)
         if img_m:
             st.metric("Accuracy", f"{img_m['accuracy']:.2%}" if img_m.get('accuracy') is not None else "N/A")
             auc_val = img_m.get('auc', img_m.get('auc_roc'))
