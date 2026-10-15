@@ -34,6 +34,7 @@ from src.inference import (
     positive_class_probability,
     screening_assessment,
 )
+from src.image_validation import image_checkpoint_validation_error
 
 # ── Optional SHAP import ───────────────────────────────────────────────────────
 try:
@@ -170,8 +171,13 @@ def load_models():
         ]):
             load_errors.append("CBC model checkpoint was not found.")
 
-    # Image
-    if os.path.exists(IMG_MODEL_PATH):
+    # Do not expose predictions from checkpoints without matching patient-independent metrics.
+    image_validation_error = image_checkpoint_validation_error(
+        IMG_MODEL_PATH, METRICS_PATH
+    )
+    if image_validation_error is not None:
+        load_errors.append(f"Image model disabled: {image_validation_error}.")
+    elif os.path.exists(IMG_MODEL_PATH):
         try:
             m = ImageModel(num_classes=2)
             state = torch.load(IMG_MODEL_PATH, map_location=device, weights_only=True)
@@ -384,11 +390,11 @@ if 'shap_result' not in st.session_state:
 # ═══════════════════════════ SIDEBAR ══════════════════════════════════════════
 with st.sidebar:
     st.markdown("## 🩺 Prenatal Anemia AI")
-    st.markdown("CBC-based screening with an optional **adjunctive eye/nail image score**.")
+    st.markdown("CBC-based screening; image scores require matching patient-independent validation.")
     st.divider()
     st.markdown("### 🔍 Model Status")
     st.markdown(f"**Tabular (XGBoost):** {'✅ Loaded' if tab_ok else '❌ Not found'}")
-    st.markdown(f"**Image (ResNet-18):** {'✅ Loaded' if img_ok else '❌ Not found'}")
+    st.markdown(f"**Image (ResNet-18):** {'✅ Validated checkpoint loaded' if img_ok else '⚠️ Disabled until validated'}")
     st.markdown("**Final assessment:** WHO HGB threshold (CBC)")
     st.markdown("**Fusion model:** Not used — no validated deployed fusion checkpoint")
     if model_load_errors:
@@ -557,8 +563,10 @@ with tabs[0]:
         else:
             st.session_state['current_image'] = None
             if not img_ok:
-                st.warning("⚠️ Image model checkpoint not found on this server. "
-                           "CBC-only prediction will be used.")
+                st.warning(
+                    "⚠️ No patient-independently validated image model is available. "
+                    "CBC-only prediction will be used."
+                )
             else:
                 st.info("ℹ️ No image provided — will run in **CBC-Only** mode.")
 
@@ -567,6 +575,13 @@ with tabs[0]:
     # ── Mode Detection ────────────────────────────────────────────────────────
     pil_img = st.session_state.get('current_image')
     has_image = pil_img is not None and img_ok
+
+    if pil_img is not None and not img_ok:
+        st.warning(
+            "Image prediction is disabled because this image model has no matching "
+            "patient-independent validation results. Use the CBC values and WHO HGB "
+            "assessment instead."
+        )
 
     if has_image:
         mode_label = "🩺 CBC assessment + adjunctive image score"
@@ -701,9 +716,9 @@ with tabs[0]:
         st.write("")
         if img_prob is not None:
             st.warning(
-                "The image result is experimental and may be wrong. The current "
-                "image model has not been independently validated on patient-separated "
-                "images; do not use it to confirm or rule out anemia."
+                "The image result is experimental and may be wrong. It is an "
+                "adjunctive research score, not a diagnosis; the WHO HGB assessment "
+                "remains the final screening category."
             )
         if sev is not None:
             st.markdown(f'<span class="{sev_cls}">📊 Severity: {sev}</span>', unsafe_allow_html=True)
@@ -744,7 +759,10 @@ with tabs[1]:
         st.subheader("👁️ Grad-CAM Heatmap")
 
         if not img_ok:
-            st.warning("⚠️ Image model checkpoint not found. Grad-CAM unavailable.")
+            st.warning(
+                "⚠️ Image model is not available until its checkpoint has matching "
+                "patient-independent validation results. Grad-CAM is unavailable."
+            )
         else:
             # Allow image selection directly in this tab too
             pil_img_exp = st.session_state.get('current_image')
@@ -975,13 +993,8 @@ with tabs[3]:
         except Exception as e:
             st.error(f"Could not load metrics.json: {e}")
 
-    image_split = (
-        metrics_data.get('dataset_statistics', {})
-        .get('image', {})
-        .get('validation_split')
-    )
     has_patient_independent_image_validation = (
-        image_split == 'patient-grouped; exact byte-identical duplicates removed'
+        image_checkpoint_validation_error(IMG_MODEL_PATH, METRICS_PATH) is None
     )
     img_m = (
         metrics_data.get('image_model')
@@ -1019,9 +1032,9 @@ with tabs[3]:
         with st.expander("📋 Historical training metrics (not deployment validation)"):
             st.warning(
                 "The older tabular experiment includes HGB as both an input and the source "
-                "of its anemia labels. Its image metrics used a random split before exact "
-                "duplicates and patient overlap were removed. Neither set of historical "
-                "scores is independent validation of the deployed models."
+                "of its anemia labels. Neither those metrics nor image metrics without a "
+                "matching patient-independent validation record are shown as validated "
+                "results for the deployed models."
             )
             st.json(metrics_data)
 

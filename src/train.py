@@ -22,6 +22,7 @@ import seaborn as sns
 
 from src.utils import set_seed, load_config
 from src.data_preprocess import load_tabular_data, get_image_loaders
+from src.image_validation import VALIDATION_SPLIT, checkpoint_sha256
 from src.models import TabularModel, ImageModel
 
 
@@ -607,7 +608,7 @@ def main():
         'train_samples': len(train_img_loader.dataset),
         'val_samples':   len(val_img_loader.dataset),
         'source_data_audit': train_img_loader.dataset.dataset_audit,
-        'validation_split': 'patient-grouped; exact byte-identical duplicates removed',
+        'validation_split': VALIDATION_SPLIT,
         'image_size':    '224x224',
         'augmentations': ['RandomHorizontalFlip', 'RandomRotation(10)',
                           'ColorJitter(0.2,0.2)', 'Normalize(ImageNet)'],
@@ -665,6 +666,9 @@ def main():
             'seed': config['training']['seed'],
         },
         'dataset_statistics': dataset_stats,
+        'image_model_artifact': {
+            'checkpoint_sha256': checkpoint_sha256(img_model_path),
+        },
         'image_model':   img_metrics,
         'tabular_model': tab_metrics,
         'fusion_model':  fusion_metrics,
